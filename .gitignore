@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+.vs/
+.dotnet/
+artifacts/
+*.user
+*.suo
+*.iso
+*.partial
