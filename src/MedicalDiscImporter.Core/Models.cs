@@ -19,6 +19,7 @@ public sealed class JobRecord
     public string DiscType { get; set; } = "Unknown";
     public string State { get; set; } = "Started";
     public string ScanState { get; set; } = "NotScanned";
+    public ScanResult? Scan { get; set; }
     public string? IsoSha256 { get; set; }
     public int FileCount { get; set; }
     public long SourceBytes { get; set; }
@@ -29,6 +30,8 @@ public sealed class JobRecord
     public string? PublishedIsoPath { get; set; }
     public string? PublishedDicomDirectory { get; set; }
     public int DicomCount { get; set; }
+    public int DicomFilesPublished { get; set; }
+    public string? RsBaseExamName { get; set; }
     public int DateFallbackCount { get; set; }
     public string[] StudyDates { get; set; } = [];
     public string? ErrorCode { get; set; }

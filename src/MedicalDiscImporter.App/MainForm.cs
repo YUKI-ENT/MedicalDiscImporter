@@ -44,7 +44,7 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 52));
         Controls.Add(layout);
         layout.Controls.Add(new Label { Text = "他院ディスクの取り込み", AutoSize = true, Font = new Font(Font.FontFamily, 24, FontStyle.Bold) }, 0, 0);
-        layout.Controls.Add(new Label { Text = "再構築ISO ｜ Defender合格後にISO・DICOM出力 ｜ 実機受入試験中", ForeColor = Color.DarkRed, AutoSize = true, Padding = new Padding(0, 8, 0, 14) }, 0, 1);
+        layout.Controls.Add(new Label { Text = "再構築ISO ｜ Defender合格後にISO・RSBase用DICOM出力 ｜ 実機受入試験中", ForeColor = Color.DarkRed, AutoSize = true, Padding = new Padding(0, 8, 0, 14) }, 0, 1);
 
         var main = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
         main.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
@@ -154,7 +154,7 @@ public sealed class MainForm : Form
             var options = ImportOptions.Load();
             options.CheckWritable();
             if (drives.SelectedItem is not string root || !new DriveInfo(root).IsReady) throw new IOException("ディスクを挿入してください。");
-            if (MessageBox.Show(this, $"患者ID：{patient.Text}\r\nドライブ：{root}\r\nDefender合格後に次のフォルダへ出力します。\r\nISO：{options.IsoDirectory}\r\nDICOM：{options.DicomDirectory}", "開始確認", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            if (MessageBox.Show(this, $"患者ID：{patient.Text}\r\nドライブ：{root}\r\nDefender合格後に次のフォルダへ出力します。\r\nISO：{options.IsoDirectory}\r\nRSBase自動取込先：{options.DicomDirectory}\r\n検査名：{options.RsBaseExamName}", "開始確認", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
             busy = true;
             patient.Enabled = drives.Enabled = keypad.Enabled = start.Enabled = refresh.Enabled = settings.Enabled = false;
             cancel.Enabled = true;
@@ -168,16 +168,20 @@ public sealed class MainForm : Form
                 progress.Style = p.Percent.HasValue ? ProgressBarStyle.Continuous : ProgressBarStyle.Marquee;
                 if (p.Percent.HasValue) progress.Value = Math.Clamp(p.Percent.Value, 0, 100);
             });
+            stage.Text = "ウイルスチェックサービスの接続を確認中";
+            await ServiceMalwareScanner.EnsureAvailableAsync(cancellation.Token);
             var importer = new PrototypeImporter(new ImapiImageBuilder(), new WindowsImageMounter());
             var completed = await importer.RunAsync(root, patient.Text, reporter, cancellation.Token);
             var catalogProgress = new Progress<IReadOnlyList<DicomEntry>>(ShowDicoms);
-            var imported = await new ImportPipeline(new DefenderScanner()).CompleteAsync(completed, options, reporter, cancellation.Token, catalogProgress);
+            var imported = await new ImportPipeline(new ServiceMalwareScanner()).CompleteAsync(completed, options, reporter, cancellation.Token, catalogProgress);
             var job = imported.Record;
             ShowDicoms(imported.Dicoms);
-            stage.Text = imported.Error != null ? (job.IsoPublished ? "部分成功：ISO保存済み・DICOM出力未完了" : "処理中止・出力なし") : job.DicomCount == 0 ? "ISO保存完了・DICOMなし" : "ISO保存・DICOM出力完了";
+            stage.Text = imported.Error != null ? (job.IsoPublished ? $"部分成功：ISO保存済み・RSBaseへ{job.DicomFilesPublished:N0}/{job.DicomCount:N0}件受け渡し" : "処理中止・出力なし") : job.DicomCount == 0 ? "ISO保存完了・DICOMなし" : "ISO保存・RSBase用DICOM受け渡し完了";
             result.Text = (imported.Error == null ? "" : imported.Error + "\r\n") +
                 $"ファイル内容照合：合格（{job.FileCount:N0}件）　ISOマウント解除：完了　Defender：{ScanLabel(job.ScanState)}\r\n" +
-                $"ISO保存：{job.PublishedIsoPath ?? "なし"}\r\nDICOM出力：{job.PublishedDicomDirectory ?? "なし"}\r\n" +
+                (job.Scan == null ? "" : job.Scan.Describe() + "\r\n" + (job.Scan.SignatureVersion == null ? "" : $"Defender定義：{job.Scan.SignatureVersion}\r\n")) +
+                $"ISO保存：{job.PublishedIsoPath ?? "なし"}\r\nRSBase取込先：{job.PublishedDicomDirectory ?? "未出力"}\r\n" +
+                $"RSBase受け渡し：{job.DicomFilesPublished:N0}/{job.DicomCount:N0}件　検査名：{job.RsBaseExamName ?? options.RsBaseExamName}\r\n" +
                 $"DICOM：{job.DicomCount:N0}ファイル　撮影日：{string.Join(", ", job.StudyDates)}　取込日で代用：{job.DateFallbackCount:N0}件\r\n" +
                 $"隔離作業領域：{imported.WorkDirectory}";
         }

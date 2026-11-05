@@ -5,9 +5,14 @@ using System.Text.Json;
 namespace MedicalDiscImporter.Core;
 
 public sealed record ScanResult(string State, string Reason, string? SignatureVersion = null, string? ScanId = null,
-    long? StartEventId = null, long? EndEventId = null, int? ExitCode = null)
+    long? StartEventId = null, long? EndEventId = null, int? ExitCode = null,
+    int? TargetFileCount = null, int? ThreatDetectionCount = null, double? ElapsedSeconds = null)
 {
     public bool Passed => State == "Passed";
+
+    public string Describe() => $"検査対象：{(TargetFileCount is { } files ? $"{files:N0}ファイル" : "取得不可")} / " +
+        $"脅威検出記録：{(ThreatDetectionCount is { } threats ? $"{threats:N0}件" : "件数取得不可")} / " +
+        $"検査処理時間：{(ElapsedSeconds is { } seconds ? $"{seconds:F1}秒" : "取得不可")}";
 }
 
 public interface IMalwareScanner

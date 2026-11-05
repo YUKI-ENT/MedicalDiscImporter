@@ -70,9 +70,4 @@ public sealed class DicomCatalog
         return (fallback, "ImportDate");
     }
 
-    public static string OutputRelativePath(string relative)
-    {
-        // Preserve names and hierarchy. An extensionless DICOM becomes <name>.dcm.
-        return Path.HasExtension(relative) ? relative : relative + ".dcm";
-    }
 }

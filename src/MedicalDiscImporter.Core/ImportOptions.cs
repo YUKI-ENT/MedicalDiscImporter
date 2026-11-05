@@ -7,10 +7,12 @@ public sealed record ImportOptions
     public string IsoDirectory { get; init; } = "";
     public string DicomDirectory { get; init; } = "";
     public int SignatureMaxAgeDays { get; init; } = 7;
+    public string RsBaseExamName { get; init; } = "CTMRI";
 
     public void Validate()
     {
         if (SignatureMaxAgeDays is < 1 or > 30) throw new ArgumentException("Defender定義の有効日数は1～30日です。");
+        RsBasePublisher.ValidateExamName(RsBaseExamName);
         foreach (var path in new[] { IsoDirectory, DicomDirectory })
         {
             if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))

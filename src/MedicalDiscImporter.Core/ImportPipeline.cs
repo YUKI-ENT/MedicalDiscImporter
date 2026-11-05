@@ -25,7 +25,9 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
                 ?? throw new IOException("元ファイル一覧がありません。");
             progress.Report(new("Defenderで全ファイルを検査中（中止時は正式出力しません）"));
             var scan = await scanner.ScanAsync(tree, options.SignatureMaxAgeDays, token);
+            scan = scan with { TargetFileCount = scan.TargetFileCount ?? manifest.Files.Count };
             job.ScanState = scan.State;
+            job.Scan = scan;
             File.WriteAllText(Path.Combine(source.WorkDirectory, "scan.json"), JsonSerializer.Serialize(scan));
             if (!scan.Passed) throw new IOException(scan.Reason);
             token.ThrowIfCancellationRequested();
@@ -37,7 +39,7 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
             job.DicomCount = dicoms.Count;
             job.DateFallbackCount = dicoms.Count(d => d.DateSource == "ImportDate");
             job.StudyDates = dicoms.Select(d => d.StudyDate.ToString("yyyy-MM-dd")).Distinct().ToArray();
-            ValidateOutputNames(dicoms);
+            job.RsBaseExamName = options.RsBaseExamName;
             catalogProgress?.Report(dicoms);
             token.ThrowIfCancellationRequested();
             job.State = "Publishing";
@@ -58,23 +60,14 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
             PrototypeImporter.Persist(source.WorkDirectory, job);
             if (dicoms.Count > 0)
             {
-                progress.Report(new("検査合格：DICOMを出力中"));
-                var staging = Path.Combine(options.DicomDirectory, $".{job.JobId}.partial");
-                if (Directory.Exists(staging)) throw new IOException("DICOMの準備フォルダが既に存在します。");
-                Directory.CreateDirectory(staging);
-                var i = 0;
-                foreach (var entry in dicoms)
+                progress.Report(new("検査合格：RSBase自動取込用のDICOMを準備中"));
+                RsBasePublisher.Publish(tree, options.DicomDirectory, source.WorkDirectory, job.JobId, job.PatientId,
+                    options.RsBaseExamName, dicoms, progress, _ =>
                 {
-                    token.ThrowIfCancellationRequested();
-                    var target = Path.Combine(staging, DicomCatalog.OutputRelativePath(entry.RelativePath));
-                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                    CopyVerified(Path.Combine(tree, entry.RelativePath), target, entry.File, token);
-                    if (++i % 50 == 0) progress.Report(new($"DICOM出力準備中：{i:N0}/{dicoms.Count:N0}", i * 100 / dicoms.Count));
-                }
-                token.ThrowIfCancellationRequested();
-                var final = Path.Combine(options.DicomDirectory, $"{job.PatientId}-{date:yyyyMMdd}-{job.JobId}");
-                Directory.Move(staging, final);
-                job.PublishedDicomDirectory = final;
+                    job.DicomFilesPublished++;
+                    job.PublishedDicomDirectory = Path.GetFullPath(options.DicomDirectory);
+                    PrototypeImporter.Persist(source.WorkDirectory, job);
+                }, token);
                 job.DicomPublished = true;
             }
             job.State = dicoms.Count > 0 ? "Completed" : "IsoOnly_NoDicom";
@@ -82,7 +75,7 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
         }
         catch (Exception ex)
         {
-            job.State = ex is OperationCanceledException ? "Cancelled" : job.IsoPublished ? "PartialOutput" : "Failed";
+            job.State = job.IsoPublished || job.DicomFilesPublished > 0 ? "PartialOutput" : ex is OperationCanceledException ? "Cancelled" : "Failed";
             if (job.ScanState == "Scanning") job.ScanState = ex is OperationCanceledException ? "Cancelled" : "Unknown";
             job.ErrorCode = $"{ex.GetType().Name}/0x{ex.HResult:X8}";
             return new ImportResult(job, source.WorkDirectory, dicoms,
@@ -95,21 +88,7 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
         }
     });
 
-    private static void ValidateOutputNames(IReadOnlyList<DicomEntry> dicoms)
-    {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in dicoms)
-        {
-            var name = DicomCatalog.OutputRelativePath(entry.RelativePath);
-            SafeFiles.SafeRelative(Path.GetFullPath("."), Path.GetFullPath(name));
-            if (!names.Add(name)) throw new IOException(".dcm付加後の名前が重複します。上書きを避けるため出力を中止します。");
-        }
-        foreach (var name in names)
-            for (var parent = Path.GetDirectoryName(name); !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
-                if (names.Contains(parent)) throw new IOException("DICOMの出力ファイル名とフォルダ名が競合します。");
-    }
-
-    private static void CopyVerified(string source, string target, FileRecord expected, CancellationToken token)
+    internal static void CopyVerified(string source, string target, FileRecord expected, CancellationToken token)
     {
         SafeFiles.RejectLink(new FileInfo(source));
         using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
