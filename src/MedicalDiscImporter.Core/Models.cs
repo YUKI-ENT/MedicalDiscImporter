@@ -18,16 +18,21 @@ public sealed class JobRecord
     public string ImageKind { get; init; } = "Reconstructed";
     public string DiscType { get; set; } = "Unknown";
     public string State { get; set; } = "Started";
-    public string ScanState { get; init; } = "NotImplemented_FormalOutputBlocked";
+    public string ScanState { get; set; } = "NotScanned";
     public string? IsoSha256 { get; set; }
     public int FileCount { get; set; }
     public long SourceBytes { get; set; }
     public bool ContentsVerified { get; set; }
     public bool Unmounted { get; set; }
-    public bool IsoPublished { get; init; } = false;
-    public bool DicomPublished { get; init; } = false;
+    public bool IsoPublished { get; set; }
+    public bool DicomPublished { get; set; }
+    public string? PublishedIsoPath { get; set; }
+    public string? PublishedDicomDirectory { get; set; }
+    public int DicomCount { get; set; }
+    public int DateFallbackCount { get; set; }
+    public string[] StudyDates { get; set; } = [];
     public string? ErrorCode { get; set; }
-    public string Warning { get; init; } = "再構築ISO。原本のトラック・セッション・起動情報等は保持しません。未検査・本番利用不可。";
+    public string Warning { get; init; } = "再構築ISO。原本のトラック・セッション・起動情報等は保持しません。";
 }
 
 public sealed record PrototypeResult(JobRecord Record, string WorkDirectory, string IsoPath);

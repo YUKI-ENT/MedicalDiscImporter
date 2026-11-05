@@ -1,4 +1,6 @@
 using MedicalDiscImporter.Core;
+using FellowOakDicom;
+using System.Text.Json;
 
 var failures = 0;
 void Check(string name, Action test)
@@ -103,6 +105,189 @@ Check("reparse point rejected", () =>
     Directory.Delete(link); // remove only the junction, never recurse
 });
 
+var dicomRoot = Path.Combine(root, "dicom-fixture");
+Directory.CreateDirectory(dicomRoot);
+void WriteDicom(string relative, string? date, string? seriesDate = null)
+{
+    var path = Path.Combine(dicomRoot, relative);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    var data = new DicomDataset
+    {
+        { DicomTag.SOPClassUID, DicomUID.CTImageStorage.UID },
+        { DicomTag.SOPInstanceUID, DicomUID.Generate().UID },
+        { DicomTag.StudyInstanceUID, DicomUID.Generate().UID },
+        { DicomTag.SeriesInstanceUID, "1.2.3.4.5" },
+        { DicomTag.SpecificCharacterSet, "ISO_IR 192" },
+        { DicomTag.PatientName, "試験^患者" },
+        { DicomTag.SeriesNumber, "2" },
+        { DicomTag.InstanceNumber, "1" },
+        { DicomTag.SeriesDescription, "AXIAL TEST" },
+        { DicomTag.SequenceName, "SE" }
+    };
+    if (date != null) data.Add(DicomTag.StudyDate, date);
+    if (seriesDate != null) data.Add(DicomTag.SeriesDate, seriesDate);
+    new DicomFile(data).Save(path);
+}
+WriteDicom("nested/IM0001", "20261031");
+WriteDicom("IM0002.dcm", null, "20261101");
+WriteDicom("IM0003.IMA", null);
+File.WriteAllText(Path.Combine(dicomRoot, "viewer.exe"), "dummy viewer bytes");
+File.WriteAllText(Path.Combine(dicomRoot, "readme"), "not DICOM");
+var dicomManifest = SafeFiles.ReadTree(dicomRoot, default);
+Check("parse extensionless DICOM and UTF-8 patient/sequence; skip ordinary files", () =>
+{
+    var entries = new DicomCatalog().Read(dicomRoot, dicomManifest, new(2026, 11, 5), quiet, default);
+    Assert(entries.Count == 3);
+    Assert(entries[0].PatientName == "試験^患者" && entries[0].Sequence == "AXIAL TEST / SE");
+    Assert(entries[0].StudyDate == new DateOnly(2026, 10, 31) && entries[0].DateSource == "StudyDate");
+    Assert(entries[1].StudyDate == new DateOnly(2026, 11, 1) && entries[1].DateSource == "SeriesDate");
+    Assert(entries[2].DateSource == "ImportDate" && entries[2].StudyDate == new DateOnly(2026, 11, 5));
+});
+Check("DICOMDIR is not an image output", () =>
+{
+    var dir = Path.Combine(root, "directory-fixture"); Directory.CreateDirectory(dir);
+    var directory = new FellowOakDicom.Media.DicomDirectory();
+    directory.AddFile(DicomFile.Open(Path.Combine(dicomRoot, "IM0002.dcm")), "IM0002");
+    directory.Save(Path.Combine(dir, "DICOMDIR"));
+    Assert(new DicomCatalog().Read(dir, SafeFiles.ReadTree(dir, default), new(2026, 11, 5), quiet, default).Count == 0);
+});
+Check("DICOM without Part 10 preamble is recognized by parser", () =>
+{
+    var dir = Path.Combine(root, "no-preamble"); Directory.CreateDirectory(dir);
+    File.WriteAllBytes(Path.Combine(dir, "IMAGE"), File.ReadAllBytes(Path.Combine(dicomRoot, "IM0002.dcm"))[132..]);
+    Assert(new DicomCatalog().Read(dir, SafeFiles.ReadTree(dir, default), new(2026, 11, 5), quiet, default).Count == 1);
+});
+Check("invalid StudyDate falls back to valid SeriesDate", () =>
+{
+    WriteDicom("fallback-test", "20261031", "20261101");
+    var bytes = File.ReadAllBytes(Path.Combine(dicomRoot, "fallback-test"));
+    var marker = System.Text.Encoding.ASCII.GetBytes("20261031");
+    var index = bytes.AsSpan().IndexOf(marker);
+    Assert(index >= 0);
+    System.Text.Encoding.ASCII.GetBytes("20261399").CopyTo(bytes, index);
+    var dir = Path.Combine(root, "invalid-date"); Directory.CreateDirectory(dir);
+    File.WriteAllBytes(Path.Combine(dir, "IMAGE"), bytes);
+    var entry = new DicomCatalog().Read(dir, SafeFiles.ReadTree(dir, default), new(2026, 11, 5), quiet, default).Single();
+    Assert(entry.DateSource == "SeriesDate" && entry.StudyDate == new DateOnly(2026, 11, 1));
+    File.Delete(Path.Combine(dicomRoot, "fallback-test"));
+});
+Check("malformed .dcm blocks output instead of silently skipping", () =>
+{
+    var dir = Path.Combine(root, "bad-dicom"); Directory.CreateDirectory(dir);
+    File.WriteAllText(Path.Combine(dir, "broken.dcm"), "invalid");
+    Reject<IOException>(() => new DicomCatalog().Read(dir, SafeFiles.ReadTree(dir, default), new(2026, 11, 5), quiet, default));
+});
+Check("cancellation interrupts catalog", () =>
+{
+    using var cts = new CancellationTokenSource(); cts.Cancel();
+    Reject<OperationCanceledException>(() => new DicomCatalog().Read(dicomRoot, dicomManifest, new(2026, 11, 5), quiet, cts.Token));
+});
+
+(PrototypeResult Source, ImportOptions Options) Fixture(string name)
+{
+    var work = Path.Combine(root, name, "work"); Directory.CreateDirectory(work);
+    var tree = Path.Combine(work, "source"); Directory.CreateDirectory(tree);
+    var snapshot = SafeFiles.ReadTree(dicomRoot, default, tree);
+    File.WriteAllText(Path.Combine(work, "manifest.json"), JsonSerializer.Serialize(snapshot));
+    var iso = Path.Combine(work, "test.iso"); File.WriteAllText(iso, "dummy ISO bytes; no mounting in this test");
+    var job = new JobRecord { PatientId = "00123", ContentsVerified = true, Unmounted = true, IsoSha256 = SafeFiles.HashFile(iso, default) };
+    return (new(job, work, iso), new() { IsoDirectory = Path.Combine(root, name, "iso"), DicomDirectory = Path.Combine(root, name, "dicom") });
+}
+ImportResult Complete((PrototypeResult Source, ImportOptions Options) f, IMalwareScanner scan, CancellationToken token = default) =>
+    new ImportPipeline(scan).CompleteAsync(f.Source, f.Options, quiet, token).GetAwaiter().GetResult();
+Check("scan pass publishes verified ISO and only DICOM with names/bytes preserved", () =>
+{
+    var f = Fixture("publish"); var r = Complete(f, new StubScanner("Passed"));
+    Assert(r.Error == null && r.Record.IsoPublished && r.Record.DicomPublished && r.Record.DicomCount == 3);
+    var output = r.Record.PublishedDicomDirectory!;
+    Assert(File.Exists(Path.Combine(output, "nested", "IM0001.dcm")));
+    Assert(File.Exists(Path.Combine(output, "IM0003.IMA")) && Directory.GetFiles(output, "*", SearchOption.AllDirectories).Length == 3);
+    Assert(SafeFiles.HashFile(Path.Combine(output, "nested", "IM0001.dcm"), default) == dicomManifest.Files.Single(f => f.RelativePath.EndsWith("IM0001")).Sha256);
+    Assert(File.Exists(r.Record.PublishedIsoPath));
+});
+foreach (var state in new[] { "ThreatDetected", "Unknown", "Disabled", "NotScanned", "Cancelled" })
+    Check($"scan {state} blocks all output", () =>
+    {
+        var f = Fixture("blocked-" + state); var r = Complete(f, new StubScanner(state));
+        Assert(r.Error != null && !r.Record.IsoPublished && !r.Record.DicomPublished);
+        Assert(!Directory.EnumerateFileSystemEntries(f.Options.IsoDirectory).Any() && !Directory.EnumerateFileSystemEntries(f.Options.DicomDirectory).Any());
+    });
+Check("successful remediation changing source cannot pass gate", () =>
+{
+    var f = Fixture("changed-after-scan");
+    var r = Complete(f, new StubScanner("Passed", dir => File.Delete(Path.Combine(dir, "viewer.exe"))));
+    Assert(r.Error != null && !r.Record.IsoPublished);
+});
+Check("ISO changed after verification cannot publish", () =>
+{
+    var f = Fixture("changed-iso");
+    var r = Complete(f, new StubScanner("Passed", _ => File.AppendAllText(f.Source.IsoPath, "changed")));
+    Assert(r.Error != null && !r.Record.IsoPublished);
+});
+Check("name collisions after .dcm suffix block both outputs", () =>
+{
+    var f = Fixture("name-collision"); var tree = Path.Combine(f.Source.WorkDirectory, "source");
+    File.Copy(Path.Combine(tree, "nested", "IM0001"), Path.Combine(tree, "nested", "IM0001.dcm"));
+    File.WriteAllText(Path.Combine(f.Source.WorkDirectory, "manifest.json"), JsonSerializer.Serialize(SafeFiles.ReadTree(tree, default)));
+    var r = Complete(f, new StubScanner("Passed")); Assert(r.Error != null && !r.Record.IsoPublished);
+});
+Check("existing ISO preserved and next ordinal allocated", () =>
+{
+    var f = Fixture("iso-collision"); f.Options.CheckWritable();
+    var old = Path.Combine(f.Options.IsoDirectory, InputRules.IsoFileName("00123", DateOnly.FromDateTime(f.Source.Record.Started.LocalDateTime)));
+    File.WriteAllText(old, "existing");
+    var r = Complete(f, new StubScanner("Passed"));
+    Assert(r.Error == null && r.Record.PublishedIsoPath!.EndsWith("-02.iso") && File.ReadAllText(old) == "existing");
+});
+Check("DICOM failure after ISO is recorded as partial output", () =>
+{
+    var f = Fixture("partial"); f.Options.CheckWritable();
+    Directory.CreateDirectory(Path.Combine(f.Options.DicomDirectory, $".{f.Source.Record.JobId}.partial"));
+    var r = Complete(f, new StubScanner("Passed"));
+    Assert(r.Error != null && r.Record.State == "PartialOutput" && r.Record.IsoPublished && !r.Record.DicomPublished);
+    var saved = JsonSerializer.Deserialize<JobRecord>(File.ReadAllText(Path.Combine(f.Source.WorkDirectory, "job.json")))!;
+    Assert(saved.IsoPublished && saved.Finished.HasValue && saved.State == "PartialOutput");
+});
+Check("cancelled scan never publishes", () =>
+{
+    var f = Fixture("cancel-scan"); using var cts = new CancellationTokenSource();
+    var r = Complete(f, new StubScanner("Passed", _ => cts.Cancel()), cts.Token);
+    Assert(r.Record.State == "Cancelled" && !r.Record.IsoPublished);
+});
+Check("no DICOM still saves ISO and explicitly reports no DICOM", () =>
+{
+    var f = Fixture("no-dicom");
+    var tree = Path.Combine(f.Source.WorkDirectory, "source");
+    foreach (var file in Directory.GetFiles(tree, "*", SearchOption.AllDirectories).Where(p => !p.EndsWith("viewer.exe") && !p.EndsWith("readme"))) File.Delete(file);
+    File.WriteAllText(Path.Combine(f.Source.WorkDirectory, "manifest.json"), JsonSerializer.Serialize(SafeFiles.ReadTree(tree, default)));
+    var r = Complete(f, new StubScanner("Passed"));
+    Assert(r.Error == null && r.Record.State == "IsoOnly_NoDicom" && r.Record.IsoPublished && !r.Record.DicomPublished);
+});
+Check("nested/relative/quarantine output paths rejected", () =>
+{
+    Reject<ArgumentException>(() => new ImportOptions { IsoDirectory = "relative", DicomDirectory = root }.Validate());
+    Reject<ArgumentException>(() => new ImportOptions { IsoDirectory = root, DicomDirectory = Path.Combine(root, "sub") }.Validate());
+    Reject<ArgumentException>(() => new ImportOptions { IsoDirectory = PrototypeImporter.WorkRoot, DicomDirectory = root }.Validate());
+});
+if (args.Contains("--defender"))
+{
+    Check("real Defender clean directory completes with correlated events", () =>
+    {
+        var scan = new DefenderScanner().ScanAsync(dicomRoot, 7, default).GetAwaiter().GetResult();
+        Console.WriteLine(JsonSerializer.Serialize(scan));
+        Assert(scan.Passed && scan.StartEventId.HasValue && scan.EndEventId.HasValue && !string.IsNullOrEmpty(scan.ScanId));
+    });
+}
+if (args.Contains("--defender-blocked"))
+{
+    Check("real Defender insufficient rights blocks output with visible reason", () =>
+    {
+        var f = Fixture("real-defender-blocked"); var r = Complete(f, new DefenderScanner());
+        Console.WriteLine(r.Error);
+        Assert(r.Error != null && r.Record.ScanState == "Unknown" && !r.Record.IsoPublished && !r.Record.DicomPublished);
+    });
+}
+
 if (args.Contains("--imapi"))
 {
     Check("real Windows IMAPI builds UDF image", () =>
@@ -133,4 +318,14 @@ return failures == 0 ? 0 : 1;
 sealed class QuietProgress : IProgress<ImportProgress>
 {
     public void Report(ImportProgress value) { }
+}
+
+sealed class StubScanner(string state, Action<string>? action = null) : IMalwareScanner
+{
+    public Task<ScanResult> ScanAsync(string directory, int signatureMaxAgeDays, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        action?.Invoke(directory);
+        return Task.FromResult(new ScanResult(state, "Synthetic test verdict"));
+    }
 }

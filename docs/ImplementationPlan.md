@@ -36,3 +36,31 @@ ARM64実機・USB光学ドライブ・読取エラー・電源断・Defender・D
 追加検証：照合の種類別診断とverification.jsonを追加し、ダミーISOの実マウント・解除を含む18試験に成功。
 ユーザー提供の実ディスク処理ログでは58ファイルの内容照合とマウント解除が成功し、ErrorCodeはnull。開発側では当該ディスクの再試験はしていない。
 成功画面に照合合格と記録用ISOハッシュを明示し、再構築方式の注意と区別するよう変更。
+
+## 2026-11-05更新：Defender・DICOM・指定フォルダ出力
+
+以下は上のM1時点の未実装判断を更新する。
+
+- M1の実機動作確認をユーザーから受領。既存の再構築・内容照合・解除フローを保持し、後段にImportPipelineを追加した。
+- DICOMはfo-dicom 5.2.6（MS-PL、.NET Standard 2.0）を採用。NuGetメタデータ・公式APIを確認し、管理コードのタグ読み取りのみ使用する。ネイティブ画像codecは導入しない。依存のMicrosoft.Extensions等とCommunityToolkitのライセンス・通知も同梱する。復元時点のNuGet脆弱性情報に既知の該当はなかった。
+- 全ファイルを解析し、拡張子なし／Part 10 preambleなしにも対応。DICOMDIRはファイルメタのMediaStorageSOPClassUIDで識別して出力対象外にする。患者名はSpecificCharacterSetを尊重する。
+- シリーズ単位の患者名・撮影日・シーケンス・ファイル数を一覧表示。StudyDate、SeriesDate、AcquisitionDate、ContentDateの順で妥当な日付を取り、不明なら取込日を明示する。画像はデコードしない。
+- 最新依頼に合わせ、指定フォルダへの抽出は元階層・元名を保持し、拡張子がない場合だけ.dcmを付加する。RSBase改名・フラットな監視フォルダへの公開は今回に含めない。RSDICOM側の監視制御問題を汎用フォルダ抽出と混同しない。
+- Defenderは通常カスタム検査を採用。DisableRemediationによるコンソールの翻訳依存の解析は採用しない。通常稼働・定義日時・リアルタイム保護を前後に検査し、正常終了コード、対象パスの開始イベント1000とScan IDが一致する完了イベント1001、脅威履歴、検出・中止・エラー・設定変更イベントを照合する。不明なら出力禁止。
+- 通常検査が除外を尊重するため、除外や脅威別アクションが存在する場合、除外を参照不能な場合、アーカイブ検査無効時は出力しない。アプリは施設のDefender設定を変更しない。
+- 開発PCの通常権限ではGet-MpPreferenceの除外がN/Aになることを実測。実検査器による出力禁止経路を確認した。MicrosoftのMpCmdRun手順は管理者起動が前提。一般スタッフ用の権限分離サービス・管理者限定設定は別工程であり未実装。正常合格と脅威検出の実スキャン、ARM64上のパーサー／Defenderは未検証として残す。
+- スキャン後に全ファイルとISOのSHA-256を再確認。出力もサイズ・SHA-256を照合する。ISOは同日衝突で続番、DICOMは処理IDのフォルダに一式準備してリネームする。既存ファイルは上書きしない。部分成功・中止・不明をjob.jsonに保存する。
+- 出力先の.partialは障害時に保持。共有の容量・障害回復・強制終了時の出力とログの整合は自動修復せず、管理者が確認する。ISOとDICOMの一括原子的公開は保証しない。
+
+追加の一次資料：
+
+- [fo-dicom 5.2.6パッケージと依存](https://www.nuget.org/packages/fo-dicom/5.2.6)
+- [DicomFile公式API](https://fo-dicom.github.io/stable/v5/api/FellowOakDicom.DicomFile.html)
+- [fo-dicomライセンス](https://github.com/fo-dicom/fo-dicom/blob/5.2.6/License.txt)
+- [Defenderイベント1000・1001・検出／エラー](https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus)
+- [Get-MpComputerStatus](https://learn.microsoft.com/en-us/powershell/module/defender/get-mpcomputerstatus)
+- [Get-MpThreatDetection](https://learn.microsoft.com/en-us/powershell/module/defender/get-mpthreatdetection)
+
+検証：ダミーDICOMによる日本語名・シーケンス・拡張子なし・preambleなし・DICOMDIR除外・不正日付の代替、非DICOM除外、破損候補拒否、検査不合格・修復変更・ISO変更・改名衝突・既存ISO保持・部分成功・中止・DICOMなしを検査した。実IMAPI・マウント解除・実Defenderの権限不足時出力禁止も含め39試験成功。Defender合格経路は差し替え検査器で検証し、実Defenderの正常スキャンを成功したとは扱わない。
+
+追加検証：製品のDefender判定スクリプトを模擬OS応答で直接実行する17試験を追加。実スキャン呼び出しは試験ハーネス内でのみ置換し、製品に検査省略スイッチは設けていない。正常合格、無効、古い／未来定義、除外／非公開除外、アーカイブ無効、完了なし、Scan ID違い、対象違い、非0終了、履歴取得不能、修復済み検出、検出イベント、中止、エラー、設定変更を確認。合計56試験成功。x64/ARM64の自己完結型発行も成功。ライセンス・通知はEXEと一緒に配布する。実機での正常Defender検査確認が残ることは変更しない。

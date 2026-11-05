@@ -103,7 +103,7 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    private static void Persist(string directory, JobRecord job)
+    internal static void Persist(string directory, JobRecord job)
     {
         var path = Path.Combine(directory, "job.json");
         File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(job, JsonOptions));
