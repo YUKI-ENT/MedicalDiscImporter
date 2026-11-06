@@ -9,6 +9,7 @@ public sealed record ImportOptions
     public string DicomDirectory { get; init; } = "";
     public int SignatureMaxAgeDays { get; init; } = 7;
     public string RsBaseExamName { get; init; } = "CTMRI";
+    public string IsoExamName { get; init; } = "CDROM";
     public bool CreateIso { get; init; } = true;
     public bool ScanForMalware { get; init; } = true;
     public bool SendDicom { get; init; } = true;
@@ -24,6 +25,7 @@ public sealed record ImportOptions
     {
         if (ScanForMalware && (SignatureMaxAgeDays is < 1 or > 30)) throw new ArgumentException("Defender定義の有効日数は1～30日です。");
         if (SendDicom) RsBasePublisher.ValidateExamName(RsBaseExamName);
+        if (CreateIso) RsBasePublisher.ValidateExamName(IsoExamName);
         foreach (var path in OutputDirectories())
         {
             if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
@@ -35,15 +37,15 @@ public sealed record ImportOptions
             for (var dir = new DirectoryInfo(full); dir != null; dir = dir.Parent)
                 if (dir.Exists) SafeFiles.RejectLink(dir);
         }
-        if (CreateIso && SendDicom && (IsWithin(IsoDirectory, DicomDirectory) || IsWithin(DicomDirectory, IsoDirectory)))
-            throw new ArgumentException("ISOとDICOMには別々の、包含関係のない出力フォルダを指定してください。");
+        if (CreateIso && SendDicom && (IsWithin(IsoDirectory, DicomDirectory, includeRoot: false) || IsWithin(DicomDirectory, IsoDirectory, includeRoot: false)))
+            throw new ArgumentException("ISOとDICOMには同じフォルダ、または包含関係のない別フォルダを指定してください。");
     }
 
-    private static bool IsWithin(string path, string root)
+    private static bool IsWithin(string path, string root, bool includeRoot = true)
     {
         var p = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
         var r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-        return p.Equals(r, StringComparison.OrdinalIgnoreCase) || p.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        return includeRoot && p.Equals(r, StringComparison.OrdinalIgnoreCase) || p.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     public void CheckWritable()

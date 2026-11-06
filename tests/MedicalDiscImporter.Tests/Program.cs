@@ -39,22 +39,24 @@ Check("release versions parse calendar dates and compare same-day revisions nume
     foreach (var value in new string?[] { null, "", "1.0.0.0", "v20260230", "v20261301", "v20261106-preview", "v20261106.-1", "v20261106.01", "v20261106.65535", new string('1', 100) })
         Assert(!ReleaseVersion.TryParse(value, out _));
 });
-Check("compiled release metadata and service comparisons distinguish older newer and unknown", () =>
+Check("service versions are independent integers and known date releases remain compatible", () =>
 {
     Assert(ReleaseVersion.TryParse(ApplicationRelease.DisplayVersion, out var current) && current == ApplicationRelease.Current);
-    Assert(ApplicationRelease.CompareService(ApplicationRelease.DisplayVersion) == ServiceVersionMatch.Same);
-    Assert(ApplicationRelease.CompareService(new ReleaseVersion(current.Date.AddDays(-1)).Display) == ServiceVersionMatch.Older);
-    Assert(ApplicationRelease.CompareService(new ReleaseVersion(current.Date.AddDays(1)).Display) == ServiceVersionMatch.Newer);
-    Assert(ApplicationRelease.CompareService(new ReleaseVersion(current.Date, current.Revision + 1).Display) == ServiceVersionMatch.Newer);
-    Assert(ApplicationRelease.CompareService(null) == ServiceVersionMatch.Unknown && ApplicationRelease.CompareService("1.0.0.0") == ServiceVersionMatch.Unknown);
-});
-Check("legacy service responses remain readable without version metadata", () =>
+    Assert(ServiceRelease.Compare(ServiceRelease.DisplayVersion) == ServiceVersionMatch.Same);
+    Assert(ServiceRelease.Compare("1", 2) == ServiceVersionMatch.Older);
+    Assert(ServiceRelease.Compare("10", 2) == ServiceVersionMatch.Newer);
+    foreach (var legacy in new[] { "v20261106", "v20261106.1" })
+        Assert(ServiceRelease.TryGetCompatibleVersion(legacy, out var version) && version == 1 && ServiceRelease.Compare(legacy) == ServiceVersionMatch.Same);
+    foreach (var invalid in new string?[] { null, "", "0", "01", "-1", "1.0", "1.0.0.0", "v1", "１", "65535", "v20261107", "v20261106.2" })
+        Assert(ServiceRelease.Compare(invalid) == ServiceVersionMatch.Unknown);
+    Assert(ServiceRelease.TryParse("65534", out var maximum) && maximum == 65534);
+});Check("legacy service responses remain readable without version metadata", () =>
 {
     var legacy = JsonSerializer.Deserialize<ScanResult>("{\"State\":\"Ready\",\"Reason\":\"Legacy response\"}")!;
     Assert(legacy.State == "Ready" && legacy.ServiceVersion == null && !legacy.Passed);
-    var response = new ScanResult("Ready", "Current response", ServiceVersion: ApplicationRelease.DisplayVersion);
+    var response = new ScanResult("Ready", "Current response", ServiceVersion: ServiceRelease.DisplayVersion);
     var restored = JsonSerializer.Deserialize<ScanResult>(JsonSerializer.Serialize(response))!;
-    Assert(restored.ServiceVersion == ApplicationRelease.DisplayVersion && restored.State == "Ready");
+    Assert(restored.ServiceVersion == ServiceRelease.DisplayVersion && restored.State == "Ready");
 });
 
 Check("patient ID rejects unsafe and full-width input", () =>
@@ -62,10 +64,10 @@ Check("patient ID rejects unsafe and full-width input", () =>
     foreach (var id in new[] { "", "../1", "1~2", "CON", "１２３", "1\n", new string('1', 33) }) Reject<ArgumentException>(() => InputRules.ValidatePatientId(id));
     InputRules.ValidatePatientId("000123");
 });
-Check("ISO naming preserves ID and collision suffix", () =>
+Check("RSBase ISO naming preserves ID and uses six-digit ordinals and import date", () =>
 {
-    Assert(InputRules.IsoFileName("0001", new DateOnly(2026, 11, 4)) == "0001-20261104.iso");
-    Assert(InputRules.IsoFileName("0001", new DateOnly(2026, 11, 4), 2) == "0001-20261104-02.iso");
+    Assert(RsBasePublisher.IsoFileName("0001", 1, new DateOnly(2026, 11, 4), "CDROM") == "0001~000001~2026_11_04~CDROM~RSB.iso");
+    Assert(RsBasePublisher.IsoFileName("0001", 2, new DateOnly(2026, 11, 4), "紹介CD") == "0001~000002~2026_11_04~紹介CD~RSB.iso");
 });
 Check("tree traversal blocked", () => Reject<IOException>(() => SafeFiles.SafeRelative(source, Path.Combine(root, "escape"))));
 Check("abnormal names blocked", () => Reject<IOException>(() => SafeFiles.SafeRelative(source, Path.Combine(source, "trailing."))));
@@ -211,14 +213,14 @@ Check("cancellation interrupts catalog", () =>
     Reject<OperationCanceledException>(() => new DicomCatalog().Read(dicomRoot, dicomManifest, new(2026, 11, 5), quiet, cts.Token));
 });
 
-(PrototypeResult Source, ImportOptions Options) Fixture(string name)
+(PrototypeResult Source, ImportOptions Options) Fixture(string name, DateTimeOffset? started = null)
 {
     var work = Path.Combine(root, name, "work"); Directory.CreateDirectory(work);
     var tree = Path.Combine(work, "source"); Directory.CreateDirectory(tree);
     var snapshot = SafeFiles.ReadTree(dicomRoot, default, tree);
     File.WriteAllText(Path.Combine(work, "manifest.json"), JsonSerializer.Serialize(snapshot));
     var iso = Path.Combine(work, "test.iso"); File.WriteAllText(iso, "dummy ISO bytes; no mounting in this test");
-    var job = new JobRecord { PatientId = "00123", ContentsVerified = true, Unmounted = true, IsoSha256 = SafeFiles.HashFile(iso, default) };
+    var job = new JobRecord { PatientId = "00123", Started = started ?? DateTimeOffset.Now, ContentsVerified = true, Unmounted = true, IsoSha256 = SafeFiles.HashFile(iso, default) };
     return (new(job, work, iso), new() { IsoDirectory = Path.Combine(root, name, "iso"), DicomDirectory = Path.Combine(root, name, "dicom") });
 }
 ImportResult Complete((PrototypeResult Source, ImportOptions Options) f, IMalwareScanner scan, CancellationToken token = default) =>
@@ -267,10 +269,90 @@ Check("identical original basenames receive distinct RSB ordinals", () =>
 Check("existing ISO preserved and next ordinal allocated", () =>
 {
     var f = Fixture("iso-collision"); f.Options.CheckWritable();
-    var old = Path.Combine(f.Options.IsoDirectory, InputRules.IsoFileName("00123", DateOnly.FromDateTime(f.Source.Record.Started.LocalDateTime)));
+    var old = Path.Combine(f.Options.IsoDirectory, RsBasePublisher.IsoFileName("00123", 1, DateOnly.FromDateTime(f.Source.Record.Started.LocalDateTime), "CDROM"));
     File.WriteAllText(old, "existing");
     var r = Complete(f, new StubScanner("Passed"));
-    Assert(r.Error == null && r.Record.PublishedIsoPath!.EndsWith("-02.iso") && File.ReadAllText(old) == "existing");
+    Assert(r.Error == null && Path.GetFileName(r.Record.PublishedIsoPath!).Split('~')[1] == "000002" && File.ReadAllText(old) == "existing");
+});
+Check("ISO uses import start date and independent configurable exam with verified bytes", () =>
+{
+    var started = new DateTimeOffset(2026, 10, 20, 23, 59, 0, TimeSpan.FromHours(9));
+    var f = Fixture("iso-date-exam", started);
+    f = (f.Source, f.Options with { IsoExamName = "紹介ディスク" });
+    var r = Complete(f, new StubScanner("Passed"));
+    var date = DateOnly.FromDateTime(started.LocalDateTime);
+    Assert(r.Error == null && Path.GetFileName(r.Record.PublishedIsoPath) == RsBasePublisher.IsoFileName("00123", 1, date, "紹介ディスク"));
+    Assert(r.Record.IsoExamName == "紹介ディスク" && r.Record.RsBaseExamName == "CTMRI");
+    Assert(SafeFiles.HashFile(r.Record.PublishedIsoPath!, default) == r.Record.IsoSha256);
+    var ledger = JsonSerializer.Deserialize<List<RsBaseOutput>>(File.ReadAllText(Path.Combine(f.Source.WorkDirectory, "rsbase-iso-output.json")))!;
+    Assert(ledger.Count == 1 && ledger[0].State == "Published" && ledger[0].FileName == Path.GetFileName(r.Record.PublishedIsoPath));
+});
+Check("ISO sequence survives immediate watcher consumption and exam changes", () =>
+{
+    var first = Fixture("iso-consumed-first");
+    var a = Complete(first, new StubScanner("Passed"));
+    Assert(a.Error == null);
+    File.Delete(a.Record.PublishedIsoPath!); // Simulate RSBase consuming the output.
+    var second = Fixture("iso-consumed-second", first.Source.Record.Started);
+    second = (second.Source, second.Options with { IsoDirectory = first.Options.IsoDirectory, IsoExamName = "別検査" });
+    var b = Complete(second, new StubScanner("Passed"));
+    Assert(b.Error == null && Path.GetFileName(b.Record.PublishedIsoPath!).Split('~')[1] == "000002");
+});
+Check("concurrent ISO publications reserve distinct ordinals", () =>
+{
+    var a = Fixture("iso-concurrent-a");
+    var b = Fixture("iso-concurrent-b", a.Source.Record.Started);
+    b = (b.Source, b.Options with { IsoDirectory = a.Options.IsoDirectory });
+    var runs = Task.WhenAll(Task.Run(() => Complete(a, new StubScanner("Passed"))), Task.Run(() => Complete(b, new StubScanner("Passed")))).GetAwaiter().GetResult();
+    Assert(runs.All(r => r.Error == null) && runs.Select(r => r.Record.PublishedIsoPath).Distinct().Count() == 2);
+});
+Check("ISO sequence ledger corruption blocks publication rather than reusing numbers", () =>
+{
+    var f = Fixture("iso-corrupt");
+    Directory.CreateDirectory(Path.Combine(f.Options.IsoDirectory, ".MedicalDiscImporter"));
+    File.WriteAllText(Path.Combine(f.Options.IsoDirectory, ".MedicalDiscImporter", "sequence.json"), "broken");
+    var r = Complete(f, new StubScanner("Passed"));
+    Assert(r.Error != null && !r.Record.IsoPublished && !Directory.GetFiles(f.Options.IsoDirectory, "*.iso").Any());
+});
+Check("legacy settings default ISO exam to CDROM and custom values survive JSON", () =>
+{
+    var old = JsonSerializer.Deserialize<ImportOptions>("{\"RsBaseExamName\":\"旧検査\"}")!;
+    Assert(old.IsoExamName == "CDROM" && old.RsBaseExamName == "旧検査");
+    var restored = JsonSerializer.Deserialize<ImportOptions>(JsonSerializer.Serialize(old with { IsoExamName = "紹介CD" }))!;
+    Assert(restored.IsoExamName == "紹介CD" && restored.RsBaseExamName == "旧検査");
+    foreach (var exam in new[] { "", "bad~exam", "bad/exam", "bad\nexam", new string('a', 41) })
+        Reject<ArgumentException>(() => (restored with { IsoExamName = exam, SendDicom = false }).Validate());
+});
+Check("ISO and DICOM share a folder and continue shared ordinals after watcher consumption", () =>
+{
+    var a = Fixture("shared-outputs-a", new DateTimeOffset(2026, 10, 31, 12, 0, 0, TimeSpan.Zero));
+    // Case and trailing separator differences still refer to the same Windows folder.
+    a = (a.Source, a.Options with { DicomDirectory = a.Options.IsoDirectory.ToUpperInvariant() + Path.DirectorySeparatorChar });
+    var first = Complete(a, new StubScanner("Passed"));
+    Assert(first.Error == null && first.Record.IsoPublished && first.Record.DicomPublished && first.Record.DicomFilesPublished == 3);
+    Assert(SafeFiles.HashFile(first.Record.PublishedIsoPath!, default) == first.Record.IsoSha256);
+    var isoName = Path.GetFileName(first.Record.PublishedIsoPath!);
+    var dicomLedger = JsonSerializer.Deserialize<List<RsBaseOutput>>(File.ReadAllText(Path.Combine(a.Source.WorkDirectory, "rsbase-output.json")))!;
+    Assert(dicomLedger.All(e => e.State == "Published" && SafeFiles.HashFile(Path.Combine(a.Options.IsoDirectory, e.FileName), default) == e.Sha256));
+    var names = dicomLedger.Select(e => e.FileName).Append(isoName).ToArray();
+    Assert(names.Select(n => string.Join("~", n.Split('~').Take(3))).Distinct().Count() == 4);
+    foreach (var name in names) File.Delete(Path.Combine(a.Options.IsoDirectory, name));
+    var b = Fixture("shared-outputs-b", a.Source.Record.Started);
+    b = (b.Source, b.Options with { IsoDirectory = a.Options.IsoDirectory, DicomDirectory = a.Options.IsoDirectory });
+    var second = Complete(b, new StubScanner("Passed"));
+    Assert(second.Error == null && Path.GetFileName(second.Record.PublishedIsoPath!).Split('~')[1] == "000004");
+    Assert(Directory.GetFiles(a.Options.IsoDirectory, "*~RSB.*").Length == 4);
+});
+Check("concurrent imports share one ISO DICOM output folder without collisions", () =>
+{
+    var a = Fixture("shared-concurrent-a");
+    a = (a.Source, a.Options with { DicomDirectory = a.Options.IsoDirectory });
+    var b = Fixture("shared-concurrent-b", a.Source.Record.Started);
+    b = (b.Source, b.Options with { IsoDirectory = a.Options.IsoDirectory, DicomDirectory = a.Options.IsoDirectory });
+    var runs = Task.WhenAll(Task.Run(() => Complete(a, new StubScanner("Passed"))), Task.Run(() => Complete(b, new StubScanner("Passed")))).GetAwaiter().GetResult();
+    Assert(runs.All(r => r.Error == null && r.Record.IsoPublished && r.Record.DicomFilesPublished == 3));
+    var names = Directory.GetFiles(a.Options.IsoDirectory, "*~RSB.*").Select(Path.GetFileName).ToArray();
+    Assert(names.Length == 8 && names.Select(n => string.Join("~", n!.Split('~').Take(3))).Distinct().Count() == 8);
 });
 Check("DICOM failure after ISO is recorded as partial output", () =>
 {
@@ -539,7 +621,7 @@ Check("service listener preserves delayed responses and repeated connections", (
             ScanServiceProtocol.WriteAsync(client, new ScanServiceRequest(ScanServiceProtocol.Version, "Ping"), deadline.Token).GetAwaiter().GetResult();
             Thread.Sleep(10); // Let the server finish writing before the client starts reading.
             var result = ScanServiceProtocol.ReadResponseAsync(client, deadline.Token).GetAwaiter().GetResult();
-            Assert(result.State == "Ready" && result.ServiceVersion == ApplicationRelease.DisplayVersion);
+            Assert(result.State == "Ready" && result.ServiceVersion == ServiceRelease.DisplayVersion);
         }
     }
     finally
@@ -659,7 +741,7 @@ Check("service worker scans matching private bytes and removes staging", () =>
         invoked = true;
         SafeFiles.Verify(serviceTree, SafeFiles.ReadTree(path, default));
     }));
-    Assert(invoked && run.Result!.Passed && run.Result.ServiceVersion == ApplicationRelease.DisplayVersion &&
+    Assert(invoked && run.Result!.Passed && run.Result.ServiceVersion == ServiceRelease.DisplayVersion &&
         run.Error == null && !Directory.EnumerateFileSystemEntries(run.Work).Any());
 });
 Check("service worker rejects corrupted upload before scanner and removes staging", () =>

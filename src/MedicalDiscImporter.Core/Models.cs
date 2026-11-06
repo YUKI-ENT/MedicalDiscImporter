@@ -37,6 +37,7 @@ public sealed class JobRecord
     public int DicomCount { get; set; }
     public int DicomFilesPublished { get; set; }
     public string? RsBaseExamName { get; set; }
+    public string? IsoExamName { get; set; }
     public int DateFallbackCount { get; set; }
     public string[] StudyDates { get; set; } = [];
     public string? ErrorCode { get; set; }
@@ -56,12 +57,6 @@ public static partial class InputRules
             throw new ArgumentException("患者IDは半角数字1～32桁で入力してください。");
     }
 
-    public static string IsoFileName(string id, DateOnly date, int ordinal = 1)
-    {
-        ValidatePatientId(id);
-        ArgumentOutOfRangeException.ThrowIfLessThan(ordinal, 1);
-        return $"{id}-{date:yyyyMMdd}{(ordinal == 1 ? "" : $"-{ordinal:00}")}.iso";
-    }
 }
 
 // Implement production engines behind these boundaries after hardware validation.

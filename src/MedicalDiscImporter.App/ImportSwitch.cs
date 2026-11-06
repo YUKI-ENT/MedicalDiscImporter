@@ -10,12 +10,19 @@ internal sealed class ImportSwitch : CheckBox
         AccessibleName = text;
         Checked = true;
         AutoSize = false;
+        // Width is assigned by the three equal table columns; only height is intrinsic.
+        Size = new Size(1, 56);
+        MinimumSize = new Size(0, 56);
         Dock = DockStyle.Fill;
         Margin = Padding.Empty;
         Cursor = Cursors.Hand;
         Font = new Font("Yu Gothic UI", 10.5f);
         SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
     }
+
+    public override Size GetPreferredSize(Size proposedSize) => new(
+        proposedSize.Width > 0 ? proposedSize.Width : (int)Math.Ceiling(136 * DeviceDpi / 96f),
+        (int)Math.Ceiling(56 * DeviceDpi / 96f));
 
     protected override void OnPaint(PaintEventArgs e)
     {

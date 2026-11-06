@@ -38,6 +38,8 @@ internal sealed class ScanServicePanel : UserControl
         this.query = query;
         this.change = change;
         this.ping = ping;
+        SuspendLayout();
+        AutoScaleMode = AutoScaleMode.Inherit;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Dock = DockStyle.Top;
@@ -80,6 +82,7 @@ internal sealed class ScanServicePanel : UserControl
                 await ServiceActionAsync(ServiceMaintenanceAction.Remove);
         };
         poll.Tick += async (_, _) => await RefreshStateAsync();
+        ResumeLayout(performLayout: true);
     }
 
     private static Label StatusLabel(string text) => new()
@@ -198,19 +201,21 @@ internal sealed class ScanServicePanel : UserControl
                 : snapshot?.Registration == ServiceRegistrationKind.Installed ? "停止・移行中のため未取得" : "確認できません");
         else if (serviceInfo == null) versions.Text = prefix + "確認中…";
         else if (!serviceInfo.Connected) versions.Text = prefix + "取得できません（検査中・接続状態を確認してください）";
-        else if (!ReleaseVersion.TryParse(serviceInfo.ServiceVersion, out var release))
+        else if (!ServiceRelease.TryGetCompatibleVersion(serviceInfo.ServiceVersion, out var release))
         {
-            versions.Text = prefix + "バージョン情報なし\r\nこのサービスはバージョン表示に未対応です。「サービスを更新」を実行してください。";
+            versions.Text = prefix + "未対応のバージョン情報\r\nサービスのバージョンを確認できません。「サービスを更新」を実行してください。";
             updateRecommended = true;
         }
         else
         {
-            var match = ApplicationRelease.CompareService(release.Display);
-            versions.Text = prefix + release.Display + (match switch
+            var match = ServiceRelease.Compare(serviceInfo.ServiceVersion);
+            var display = ServiceRelease.TryParse(serviceInfo.ServiceVersion, out _) ? release.ToString()
+                : $"{serviceInfo.ServiceVersion}（旧表記・サービス版{release}相当）";
+            versions.Text = prefix + display + (match switch
             {
-                ServiceVersionMatch.Older => "\r\nサービスがアプリより古いバージョンです。「サービスを更新」を実行してください。",
-                ServiceVersionMatch.Newer => "（アプリより新しいバージョンです。アプリの更新を確認してください）",
-                _ => "（アプリと一致）"
+                ServiceVersionMatch.Older => $"\r\nサービス基準版{ServiceRelease.DisplayVersion}より古いバージョンです。「サービスを更新」を実行してください。",
+                ServiceVersionMatch.Newer => "（同梱サービスより新しいバージョンです）",
+                _ => "（更新不要）"
             });
             updateRecommended = match == ServiceVersionMatch.Older;
         }

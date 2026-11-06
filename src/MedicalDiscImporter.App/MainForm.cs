@@ -2,7 +2,7 @@ using MedicalDiscImporter.Core;
 
 namespace MedicalDiscImporter.App;
 
-public sealed class MainForm : Form
+public sealed class MainForm : DpiAwareForm
 {
     private static readonly Color Ink = Color.FromArgb(29, 53, 71);
     private static readonly Color Muted = Color.FromArgb(111, 131, 148);
@@ -25,7 +25,7 @@ public sealed class MainForm : Form
     private readonly ImportSwitch isoSwitch = new("ISOイメージ");
     private readonly ImportSwitch scanSwitch = new("ウイルススキャン");
     private readonly ImportSwitch dicomSwitch = new("DICOM送信");
-    private readonly TableLayoutPanel operationSwitches = new() { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty };
+    private readonly TableLayoutPanel operationSwitches = new() { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, Margin = Padding.Empty };
     private readonly ImportJourney journey = new();
     private readonly TabControl outputTabs = new() { Dock = DockStyle.Fill, Padding = new Point(16, 6), Font = new Font("Yu Gothic UI", 12) };
     private readonly TabPage detailsTab = new("保存先・検査の詳細") { BackColor = Color.White, Padding = new Padding(12) };
@@ -56,7 +56,6 @@ public sealed class MainForm : Form
         Icon = AppBrand.Icon;
         Font = new Font("Yu Gothic UI", 13);
         ForeColor = Ink;
-        AutoScaleMode = AutoScaleMode.Dpi;
         ClientSize = new Size(1200, 900);
         MinimumSize = new Size(1000, 800);
         StartPosition = FormStartPosition.CenterScreen;
@@ -64,20 +63,20 @@ public sealed class MainForm : Form
         DoubleBuffered = true;
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 4 };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 330));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 174));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Controls.Add(layout);
+        Controls.Add(new DpiViewport(layout, new Size(960, 820)));
 
-        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, Margin = Padding.Empty };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
-        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, Margin = Padding.Empty };
-        heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        heading.Controls.Add(new Label { Text = "MedicalDiscImporter", Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 20, FontStyle.Bold) }, 0, 0);
-        heading.Controls.Add(new Label { Text = "患者IDとディスクを確認して、取り込みを開始してください", Dock = DockStyle.Fill, ForeColor = Muted, Font = new Font(Font.FontFamily, 11) }, 0, 1);
+        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, RowCount = 2, Margin = Padding.Empty };
+        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heading.Controls.Add(new Label { Text = "MedicalDiscImporter", AutoSize = true, Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 20, FontStyle.Bold) }, 0, 0);
+        heading.Controls.Add(new Label { Text = "患者IDとディスクを確認して、取り込みを開始してください", AutoSize = true, Dock = DockStyle.Fill, ForeColor = Muted, Font = new Font(Font.FontFamily, 11) }, 0, 1);
         header.Controls.Add(heading, 0, 0);
         settings.Dock = DockStyle.Top;
         settings.Height = 36;
@@ -149,8 +148,8 @@ public sealed class MainForm : Form
         var actions = Card();
         actions.Margin = new Padding(0, 6, 0, 0);
         actions.RowCount = 3;
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         actions.Controls.Add(SectionTitle("取込操作"), 0, 0);
         for (var column = 0; column < 3; column++) operationSwitches.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
@@ -251,6 +250,7 @@ public sealed class MainForm : Form
             driveTimer.Start();
             await RefreshDrivesAsync();
         };
+        CompleteLayout();
     }
 
     private static TableLayoutPanel Card() => new()
@@ -450,7 +450,7 @@ public sealed class MainForm : Form
             return;
         }
         var scanNotice = options.ScanForMalware ? "ウイルス検査合格後に、選択した出力を実行します。" : "ウイルススキャンOFF：未検査で選択した出力を実行します。";
-        if (MessageBox.Show(this, $"患者ID：{patient.Text}\r\nドライブ：{root}\r\n{scanNotice}\r\nISOイメージ：{(options.CreateIso ? options.IsoDirectory : "OFF")}\r\nDICOM送信：{(options.SendDicom ? options.DicomDirectory : "OFF")}\r\n検査名：{options.RsBaseExamName}", "開始確認", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        if (MessageBox.Show(this, $"患者ID：{patient.Text}\r\nドライブ：{root}\r\n{scanNotice}\r\nISOイメージ：{(options.CreateIso ? options.IsoDirectory + "（検査名：" + options.IsoExamName + "／取込日）" : "OFF")}\r\nDICOM送信：{(options.SendDicom ? options.DicomDirectory : "OFF")}\r\nDICOM検査名：{options.RsBaseExamName}", "開始確認", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
         try
         {
             busy = true;

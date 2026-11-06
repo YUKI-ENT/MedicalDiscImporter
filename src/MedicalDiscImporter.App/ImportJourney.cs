@@ -25,6 +25,8 @@ internal sealed class ImportJourney : Control
     }
 
     public void Reset() { current = -1; complete = false; stopped = null; UpdateDescription(); }
+    public override Size GetPreferredSize(Size proposedSize) => new(
+        Math.Max(0, proposedSize.Width), (int)Math.Ceiling(110 * DeviceDpi / 96f));
     public void Configure(ImportOptions options)
     {
         skipped[1] = !options.CreateIso;

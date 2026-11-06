@@ -36,7 +36,7 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
         SafeFiles.CreatePrivateDirectory(work);
         var tree = Path.Combine(work, "source");
         Directory.CreateDirectory(tree);
-        var iso = Path.Combine(work, InputRules.IsoFileName(patientId, DateOnly.FromDateTime(DateTime.Today)));
+        var iso = Path.Combine(work, "disc.iso");
         var partial = iso + ".partial";
         var mountAttempted = false;
         var sleepSet = false;

@@ -4,8 +4,6 @@ using System.Text.RegularExpressions;
 
 namespace MedicalDiscImporter.Core;
 
-public enum ServiceVersionMatch { Unknown, Same, Older, Newer }
-
 public readonly partial record struct ReleaseVersion(DateOnly Date, int Revision = 0) : IComparable<ReleaseVersion>
 {
     public string Display => "v" + Date.ToString("yyyyMMdd", CultureInfo.InvariantCulture) +
@@ -39,11 +37,5 @@ public static class ApplicationRelease
         var value = typeof(ApplicationRelease).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         return ReleaseVersion.TryParse(value, out var release) ? release
             : throw new InvalidOperationException("Version.propsのリリースバージョンが不正です。");
-    }
-
-    public static ServiceVersionMatch CompareService(string? version)
-    {
-        if (!ReleaseVersion.TryParse(version, out var service)) return ServiceVersionMatch.Unknown;
-        return service.CompareTo(Current) switch { < 0 => ServiceVersionMatch.Older, > 0 => ServiceVersionMatch.Newer, _ => ServiceVersionMatch.Same };
     }
 }

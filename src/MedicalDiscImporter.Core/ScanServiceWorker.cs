@@ -13,7 +13,7 @@ public sealed class ScanServiceWorker(IMalwareScanner scanner)
         if (request.Operation == "Ping")
         {
             await ScanServiceProtocol.WriteResponseAsync(pipe,
-                new ScanResult("Ready", "検査サービスに接続しました。", ServiceVersion: ApplicationRelease.DisplayVersion), token);
+                new ScanResult("Ready", "検査サービスに接続しました。", ServiceVersion: ServiceRelease.DisplayVersion), token);
             return;
         }
         // Limit slow uploads separately from the Defender scan itself.
@@ -50,7 +50,7 @@ public sealed class ScanServiceWorker(IMalwareScanner scanner)
         }
         finally { DeleteStaging(staging); }
         // Cleanup failure also blocks success. No uploaded files are retained after a completed request.
-        await ScanServiceProtocol.WriteResponseAsync(pipe, result with { ServiceVersion = ApplicationRelease.DisplayVersion }, token);
+        await ScanServiceProtocol.WriteResponseAsync(pipe, result with { ServiceVersion = ServiceRelease.DisplayVersion }, token);
     }
 
     private static async Task MonitorDisconnectAsync(Stream pipe, CancellationTokenSource scan, CancellationToken token)

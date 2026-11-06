@@ -59,6 +59,7 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
             job.DateFallbackCount = dicoms.Count(d => d.DateSource == "ImportDate");
             job.StudyDates = dicoms.Select(d => d.StudyDate.ToString("yyyy-MM-dd")).Distinct().ToArray();
             job.RsBaseExamName = options.RsBaseExamName;
+            job.IsoExamName = options.IsoExamName;
             catalogProgress?.Report(dicoms);
             token.ThrowIfCancellationRequested();
             job.State = "Publishing";
@@ -67,18 +68,13 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
             {
                 progress.Report(new("ISOを保存しています", Phase: ImportPhase.Exporting));
                 var date = DateOnly.FromDateTime(job.Started.LocalDateTime);
-                // Same-directory temporary file, verified bytes, no overwrite; retry only name collisions.
-                var isoStage = Path.Combine(options.IsoDirectory, $".{job.JobId}.iso.partial");
-                CopyVerified(source.IsoPath!, isoStage, new("", new FileInfo(source.IsoPath!).Length, job.IsoSha256!), token);
-                for (var ordinal = 1; ; ordinal++)
+                RsBasePublisher.PublishIso(source.IsoPath!, options.IsoDirectory, source.WorkDirectory, job.JobId,
+                    job.PatientId, date, options.IsoExamName, job.IsoSha256!, progress, target =>
                 {
-                    token.ThrowIfCancellationRequested();
-                    var target = Path.Combine(options.IsoDirectory, InputRules.IsoFileName(job.PatientId, date, ordinal));
-                    try { File.Move(isoStage, target, false); job.PublishedIsoPath = target; break; }
-                    catch (IOException) when (File.Exists(target)) { }
-                }
-                job.IsoPublished = true;
-                PrototypeImporter.Persist(source.WorkDirectory, job);
+                    job.PublishedIsoPath = target;
+                    job.IsoPublished = true;
+                    PrototypeImporter.Persist(source.WorkDirectory, job);
+                }, token);
             }
             if (options.SendDicom && dicoms.Count > 0)
             {
