@@ -14,28 +14,47 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
         IReadOnlyList<DicomEntry> dicoms = [];
         try
         {
+            job.CreateIsoRequested = options.CreateIso;
+            job.ScanRequested = options.ScanForMalware;
+            job.DicomSendRequested = options.SendDicom;
+            if (!options.HasAnyOperation) throw new ArgumentException("実行する処理を選んでください。");
             options.CheckWritable();
-            if (!job.ContentsVerified || !job.Unmounted) throw new IOException("ISO照合・解除が完了していません。");
+            if (!job.ContentsVerified || options.CreateIso && (!job.Unmounted || source.IsoPath == null))
+                throw new IOException("ファイル内容の照合、またはISOの照合・解除が完了していません。");
             job.Finished = null;
-            job.State = "Scanning";
-            job.ScanState = "Scanning";
+            job.State = "Processing";
             PrototypeImporter.Persist(source.WorkDirectory, job);
             var tree = Path.Combine(source.WorkDirectory, "source");
             var manifest = JsonSerializer.Deserialize<TreeSnapshot>(File.ReadAllText(Path.Combine(source.WorkDirectory, "manifest.json")))
                 ?? throw new IOException("元ファイル一覧がありません。");
-            progress.Report(new("Defenderで全ファイルを検査中（中止時は正式出力しません）"));
-            var scan = await scanner.ScanAsync(tree, options.SignatureMaxAgeDays, token);
-            scan = scan with { TargetFileCount = scan.TargetFileCount ?? manifest.Files.Count };
-            job.ScanState = scan.State;
-            job.Scan = scan;
-            File.WriteAllText(Path.Combine(source.WorkDirectory, "scan.json"), JsonSerializer.Serialize(scan));
-            if (!scan.Passed) throw new IOException(scan.Reason);
+            if (options.ScanForMalware)
+            {
+                job.State = "Scanning";
+                job.ScanState = "Scanning";
+                PrototypeImporter.Persist(source.WorkDirectory, job);
+                progress.Report(new("ウイルス検査を実行しています", Phase: ImportPhase.Scanning));
+                var scan = await scanner.ScanAsync(tree, options.SignatureMaxAgeDays, token);
+                scan = scan with { TargetFileCount = scan.TargetFileCount ?? manifest.Files.Count };
+                job.ScanState = scan.State;
+                job.Scan = scan;
+                File.WriteAllText(Path.Combine(source.WorkDirectory, "scan.json"), JsonSerializer.Serialize(scan));
+                if (!scan.Passed) throw new IOException(scan.Reason);
+            }
+            else
+            {
+                job.ScanState = "SkippedByUser";
+                job.Scan = new ScanResult("SkippedByUser", "ユーザー設定によりウイルススキャンを実施していません。未検査です。");
+                File.WriteAllText(Path.Combine(source.WorkDirectory, "scan.json"), JsonSerializer.Serialize(job.Scan));
+            }
             token.ThrowIfCancellationRequested();
             // A successful remediation can return 0. Missing/changed files must still block publication.
             SafeFiles.Verify(manifest, SafeFiles.ReadTree(tree, token));
-            if (SafeFiles.HashFile(source.IsoPath, token) != job.IsoSha256) throw new IOException("検査中にISOが変化しました。");
-            progress.Report(new("DICOM情報を読み取り中"));
-            dicoms = new DicomCatalog().Read(tree, manifest, DateOnly.FromDateTime(job.Started.LocalDateTime), progress, token);
+            if (options.CreateIso && SafeFiles.HashFile(source.IsoPath!, token) != job.IsoSha256) throw new IOException("処理中にISOが変化しました。");
+            if (options.SendDicom)
+            {
+                progress.Report(new("DICOM情報を読み取っています", Phase: ImportPhase.Exporting));
+                dicoms = new DicomCatalog().Read(tree, manifest, DateOnly.FromDateTime(job.Started.LocalDateTime), progress, token);
+            }
             job.DicomCount = dicoms.Count;
             job.DateFallbackCount = dicoms.Count(d => d.DateSource == "ImportDate");
             job.StudyDates = dicoms.Select(d => d.StudyDate.ToString("yyyy-MM-dd")).Distinct().ToArray();
@@ -44,23 +63,26 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
             token.ThrowIfCancellationRequested();
             job.State = "Publishing";
             PrototypeImporter.Persist(source.WorkDirectory, job);
-            progress.Report(new("検査合格：ISOを保存中"));
-            var date = DateOnly.FromDateTime(job.Started.LocalDateTime);
-            // Same-directory temporary file, verified bytes, no overwrite; retry only name collisions.
-            var isoStage = Path.Combine(options.IsoDirectory, $".{job.JobId}.iso.partial");
-            CopyVerified(source.IsoPath, isoStage, new("", new FileInfo(source.IsoPath).Length, job.IsoSha256!), token);
-            for (var ordinal = 1; ; ordinal++)
+            if (options.CreateIso)
             {
-                token.ThrowIfCancellationRequested();
-                var target = Path.Combine(options.IsoDirectory, InputRules.IsoFileName(job.PatientId, date, ordinal));
-                try { File.Move(isoStage, target, false); job.PublishedIsoPath = target; break; }
-                catch (IOException) when (File.Exists(target)) { }
+                progress.Report(new("ISOを保存しています", Phase: ImportPhase.Exporting));
+                var date = DateOnly.FromDateTime(job.Started.LocalDateTime);
+                // Same-directory temporary file, verified bytes, no overwrite; retry only name collisions.
+                var isoStage = Path.Combine(options.IsoDirectory, $".{job.JobId}.iso.partial");
+                CopyVerified(source.IsoPath!, isoStage, new("", new FileInfo(source.IsoPath!).Length, job.IsoSha256!), token);
+                for (var ordinal = 1; ; ordinal++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var target = Path.Combine(options.IsoDirectory, InputRules.IsoFileName(job.PatientId, date, ordinal));
+                    try { File.Move(isoStage, target, false); job.PublishedIsoPath = target; break; }
+                    catch (IOException) when (File.Exists(target)) { }
+                }
+                job.IsoPublished = true;
+                PrototypeImporter.Persist(source.WorkDirectory, job);
             }
-            job.IsoPublished = true;
-            PrototypeImporter.Persist(source.WorkDirectory, job);
-            if (dicoms.Count > 0)
+            if (options.SendDicom && dicoms.Count > 0)
             {
-                progress.Report(new("検査合格：RSBase自動取込用のDICOMを準備中"));
+                progress.Report(new("DICOMを出力しています", Phase: ImportPhase.Exporting));
                 RsBasePublisher.Publish(tree, options.DicomDirectory, source.WorkDirectory, job.JobId, job.PatientId,
                     options.RsBaseExamName, dicoms, progress, _ =>
                 {
@@ -70,7 +92,7 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
                 }, token);
                 job.DicomPublished = true;
             }
-            job.State = dicoms.Count > 0 ? "Completed" : "IsoOnly_NoDicom";
+            job.State = options.SendDicom && dicoms.Count == 0 ? (job.IsoPublished ? "IsoOnly_NoDicom" : "NoDicom") : "Completed";
             return new ImportResult(job, source.WorkDirectory, dicoms);
         }
         catch (Exception ex)

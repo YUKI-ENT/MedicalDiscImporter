@@ -21,7 +21,7 @@ public sealed class ImapiImageBuilder : IImageBuilder
             fsi.FreeMediaBlocks = 0; // unlimited; source already bounded to MaxBytes
             fsi.VolumeName = "MEDICAL_DISC";
             root = fsi.Root;
-            progress.Report(new ImportProgress("再構築ISOの構成中（COM処理の完了後に中止できます）"));
+            progress.Report(new ImportProgress("ISOの構成を準備しています", Phase: ImportPhase.CreatingIso));
             ((dynamic)root).AddTree(sourceDirectory, false);
             token.ThrowIfCancellationRequested();
             result = fsi.CreateResultImage();
@@ -33,6 +33,7 @@ public sealed class ImapiImageBuilder : IImageBuilder
             using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             var buffer = new byte[1024 * 1024];
             long written = 0;
+            var reportClock = System.Diagnostics.Stopwatch.StartNew();
             while (written < stat.cbSize)
             {
                 token.ThrowIfCancellationRequested();
@@ -41,7 +42,11 @@ public sealed class ImapiImageBuilder : IImageBuilder
                 if (n <= 0 || n > buffer.Length) throw new IOException("ISOストリーム読取失敗");
                 output.Write(buffer, 0, n);
                 written += n;
-                progress.Report(new ImportProgress("再構築ISOを書込中", (int)(written * 100 / stat.cbSize)));
+                if (reportClock.ElapsedMilliseconds >= 200 || written == stat.cbSize)
+                {
+                    progress.Report(new ImportProgress("ISOを作成しています", (int)(written * 100 / stat.cbSize), ImportPhase.CreatingIso));
+                    reportClock.Restart();
+                }
             }
             output.Flush(true);
         }

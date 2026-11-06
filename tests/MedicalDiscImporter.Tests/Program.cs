@@ -29,6 +29,34 @@ File.WriteAllText(Path.Combine(source, "viewer.exe"), "dummy non-executable cont
 File.WriteAllBytes(Path.Combine(source, "zero.dat"), []);
 var quiet = new QuietProgress();
 
+Check("release versions parse calendar dates and compare same-day revisions numerically", () =>
+{
+    Assert(ReleaseVersion.TryParse("v20261106", out var a) && a.Display == "v20261106");
+    Assert(ReleaseVersion.TryParse("20261106.2", out var b));
+    Assert(ReleaseVersion.TryParse("v20261106.10", out var c) && c.CompareTo(b) > 0);
+    Assert(ReleaseVersion.TryParse("v20261107", out var d) && d.CompareTo(c) > 0);
+    Assert(ReleaseVersion.TryParse("v20261106.0", out var same) && same.CompareTo(a) == 0);
+    foreach (var value in new string?[] { null, "", "1.0.0.0", "v20260230", "v20261301", "v20261106-preview", "v20261106.-1", "v20261106.01", "v20261106.65535", new string('1', 100) })
+        Assert(!ReleaseVersion.TryParse(value, out _));
+});
+Check("compiled release metadata and service comparisons distinguish older newer and unknown", () =>
+{
+    Assert(ReleaseVersion.TryParse(ApplicationRelease.DisplayVersion, out var current) && current == ApplicationRelease.Current);
+    Assert(ApplicationRelease.CompareService(ApplicationRelease.DisplayVersion) == ServiceVersionMatch.Same);
+    Assert(ApplicationRelease.CompareService(new ReleaseVersion(current.Date.AddDays(-1)).Display) == ServiceVersionMatch.Older);
+    Assert(ApplicationRelease.CompareService(new ReleaseVersion(current.Date.AddDays(1)).Display) == ServiceVersionMatch.Newer);
+    Assert(ApplicationRelease.CompareService(new ReleaseVersion(current.Date, current.Revision + 1).Display) == ServiceVersionMatch.Newer);
+    Assert(ApplicationRelease.CompareService(null) == ServiceVersionMatch.Unknown && ApplicationRelease.CompareService("1.0.0.0") == ServiceVersionMatch.Unknown);
+});
+Check("legacy service responses remain readable without version metadata", () =>
+{
+    var legacy = JsonSerializer.Deserialize<ScanResult>("{\"State\":\"Ready\",\"Reason\":\"Legacy response\"}")!;
+    Assert(legacy.State == "Ready" && legacy.ServiceVersion == null && !legacy.Passed);
+    var response = new ScanResult("Ready", "Current response", ServiceVersion: ApplicationRelease.DisplayVersion);
+    var restored = JsonSerializer.Deserialize<ScanResult>(JsonSerializer.Serialize(response))!;
+    Assert(restored.ServiceVersion == ApplicationRelease.DisplayVersion && restored.State == "Ready");
+});
+
 Check("patient ID rejects unsafe and full-width input", () =>
 {
     foreach (var id in new[] { "", "../1", "1~2", "CON", "１２３", "1\n", new string('1', 33) }) Reject<ArgumentException>(() => InputRules.ValidatePatientId(id));
@@ -224,7 +252,7 @@ Check("successful remediation changing source cannot pass gate", () =>
 Check("ISO changed after verification cannot publish", () =>
 {
     var f = Fixture("changed-iso");
-    var r = Complete(f, new StubScanner("Passed", _ => File.AppendAllText(f.Source.IsoPath, "changed")));
+    var r = Complete(f, new StubScanner("Passed", _ => File.AppendAllText(f.Source.IsoPath!, "changed")));
     Assert(r.Error != null && !r.Record.IsoPublished);
 });
 Check("identical original basenames receive distinct RSB ordinals", () =>
@@ -273,6 +301,87 @@ Check("nested/relative/quarantine output paths rejected", () =>
     Reject<ArgumentException>(() => new ImportOptions { IsoDirectory = "relative", DicomDirectory = root }.Validate());
     Reject<ArgumentException>(() => new ImportOptions { IsoDirectory = root, DicomDirectory = Path.Combine(root, "sub") }.Validate());
     Reject<ArgumentException>(() => new ImportOptions { IsoDirectory = PrototypeImporter.WorkRoot, DicomDirectory = root }.Validate());
+});
+Check("legacy settings default all operations on and selection survives JSON roundtrip", () =>
+{
+    var legacy = JsonSerializer.Deserialize<ImportOptions>("{\"IsoDirectory\":\"\",\"DicomDirectory\":\"\"}")!;
+    Assert(legacy.CreateIso && legacy.ScanForMalware && legacy.SendDicom);
+    var selected = legacy with { CreateIso = false, ScanForMalware = false, SendDicom = true };
+    var restored = JsonSerializer.Deserialize<ImportOptions>(JsonSerializer.Serialize(selected))!;
+    Assert(!restored.CreateIso && !restored.ScanForMalware && restored.SendDicom);
+});
+PrototypeResult WithoutIso(PrototypeResult source)
+{
+    File.Delete(source.IsoPath!);
+    return source with { IsoPath = null, Record = new JobRecord
+    {
+        PatientId = source.Record.PatientId, ContentsVerified = true, ImageKind = "None", CreateIsoRequested = false
+    } };
+}
+for (var mask = 0; mask < 8; mask++)
+{
+    var choice = mask;
+    Check($"operation selection {choice:000} only invokes selected scan and outputs", () =>
+    {
+        var f = Fixture("selection-" + choice);
+        var iso = (choice & 1) != 0; var scan = (choice & 2) != 0; var dicom = (choice & 4) != 0;
+        var selected = f.Options with
+        {
+            CreateIso = iso, ScanForMalware = scan, SendDicom = dicom,
+            IsoDirectory = iso ? f.Options.IsoDirectory : "unused-invalid-ISO-path",
+            DicomDirectory = dicom ? f.Options.DicomDirectory : "unused-invalid-DICOM-path",
+            RsBaseExamName = dicom ? "CTMRI" : "invalid~unused"
+        };
+        var sourceJob = iso ? f.Source : WithoutIso(f.Source);
+        var scanner = new CountingScanner();
+        var r = Complete((sourceJob, selected), scanner);
+        Assert(scanner.Calls == (scan ? 1 : 0));
+        if (choice == 0)
+        {
+            Assert(r.Error != null && !r.Record.IsoPublished && !r.Record.DicomPublished);
+            Assert(!Directory.Exists(f.Options.IsoDirectory) && !Directory.Exists(f.Options.DicomDirectory));
+            return;
+        }
+        Assert(r.Error == null && r.Record.IsoPublished == iso && r.Record.DicomPublished == dicom);
+        Assert(Directory.Exists(f.Options.IsoDirectory) == iso && Directory.Exists(f.Options.DicomDirectory) == dicom);
+        Assert(r.Record.ScanState == (scan ? "Passed" : "SkippedByUser"));
+        Assert(r.Record.CreateIsoRequested == iso && r.Record.ScanRequested == scan && r.Record.DicomSendRequested == dicom);
+        Assert(r.Record.DicomCount == (dicom ? 3 : 0));
+        if (!scan) Assert(r.Record.Scan?.Passed == false && r.Record.Scan.Describe().Contains("未検査"));
+        if (!iso) Assert(r.Record.IsoSha256 == null && !r.Record.Unmounted);
+        var saved = JsonSerializer.Deserialize<JobRecord>(File.ReadAllText(Path.Combine(r.WorkDirectory, "job.json")))!;
+        Assert(saved.ScanRequested == scan && saved.CreateIsoRequested == iso && saved.DicomSendRequested == dicom);
+    });
+}
+Check("file integrity remains mandatory with malware scan explicitly off", () =>
+{
+    var f = Fixture("unscanned-changed-tree");
+    File.AppendAllText(Path.Combine(f.Source.WorkDirectory, "source", "viewer.exe"), "changed after read");
+    var scanner = new CountingScanner();
+    var r = Complete((f.Source, f.Options with { ScanForMalware = false }), scanner);
+    Assert(r.Error != null && scanner.Calls == 0 && !r.Record.IsoPublished && !r.Record.DicomPublished);
+});
+Check("ISO integrity remains mandatory with malware scan explicitly off", () =>
+{
+    var f = Fixture("unscanned-changed-iso"); File.AppendAllText(f.Source.IsoPath!, "changed");
+    var r = Complete((f.Source, f.Options with { ScanForMalware = false }), new CountingScanner());
+    Assert(r.Error != null && !r.Record.IsoPublished && !r.Record.DicomPublished);
+});
+Check("scan failure still blocks DICOM when ISO creation is off", () =>
+{
+    var f = Fixture("dicom-only-scan-failure"); var sourceJob = WithoutIso(f.Source);
+    var r = Complete((sourceJob, f.Options with { CreateIso = false, IsoDirectory = "unused" }), new StubScanner("ThreatDetected"));
+    Assert(r.Error != null && !r.Record.DicomPublished && !r.Record.IsoPublished && r.Record.ScanState == "ThreatDetected");
+});
+Check("scan-only never parses or sends DICOM and needs no output paths", () =>
+{
+    var f = Fixture("scan-only-malformed-dicom"); var sourceJob = WithoutIso(f.Source);
+    var tree = Path.Combine(sourceJob.WorkDirectory, "source");
+    File.WriteAllText(Path.Combine(tree, "broken.dcm"), "intentionally malformed DICOM");
+    File.WriteAllText(Path.Combine(sourceJob.WorkDirectory, "manifest.json"), JsonSerializer.Serialize(SafeFiles.ReadTree(tree, default)));
+    var options = new ImportOptions { CreateIso = false, SendDicom = false, IsoDirectory = "", DicomDirectory = "" };
+    var r = Complete((sourceJob, options), new CountingScanner());
+    Assert(r.Error == null && r.Record.ScanState == "Passed" && r.Record.DicomCount == 0 && !r.Record.IsoPublished && !r.Record.DicomPublished);
 });
 Check("RSB exam names reject separators, traversal and blank names", () =>
 {
@@ -430,7 +539,7 @@ Check("service listener preserves delayed responses and repeated connections", (
             ScanServiceProtocol.WriteAsync(client, new ScanServiceRequest(ScanServiceProtocol.Version, "Ping"), deadline.Token).GetAwaiter().GetResult();
             Thread.Sleep(10); // Let the server finish writing before the client starts reading.
             var result = ScanServiceProtocol.ReadResponseAsync(client, deadline.Token).GetAwaiter().GetResult();
-            Assert(result.State == "Ready");
+            Assert(result.State == "Ready" && result.ServiceVersion == ApplicationRelease.DisplayVersion);
         }
     }
     finally
@@ -550,7 +659,8 @@ Check("service worker scans matching private bytes and removes staging", () =>
         invoked = true;
         SafeFiles.Verify(serviceTree, SafeFiles.ReadTree(path, default));
     }));
-    Assert(invoked && run.Result!.Passed && run.Error == null && !Directory.EnumerateFileSystemEntries(run.Work).Any());
+    Assert(invoked && run.Result!.Passed && run.Result.ServiceVersion == ApplicationRelease.DisplayVersion &&
+        run.Error == null && !Directory.EnumerateFileSystemEntries(run.Work).Any());
 });
 Check("service worker rejects corrupted upload before scanner and removes staging", () =>
 {
@@ -723,6 +833,25 @@ if (args.Contains("--imapi"))
             }
             finally { mounter.DismountAsync(iso).GetAwaiter().GetResult(); }
         });
+        Check("ISO off reads and verifies a dummy disc without building or mounting another image", () =>
+        {
+            var mounter = new WindowsImageMounter();
+            var iso = Path.Combine(root, "dummy.iso");
+            try
+            {
+                var mounted = mounter.MountAsync(iso, default).GetAwaiter().GetResult();
+                var phases = new RecordingProgress();
+                var prepared = new PrototypeImporter(new ForbiddenImageBuilder(), new ForbiddenImageMounter())
+                    .RunAsync(mounted, "000123", phases, default, new ImportOptions { CreateIso = false, ScanForMalware = false })
+                    .GetAwaiter().GetResult();
+                Assert(prepared.IsoPath == null && prepared.Record.IsoSha256 == null && prepared.Record.ContentsVerified && !prepared.Record.Unmounted);
+                Assert(prepared.Record.ImageKind == "None" && !prepared.Record.CreateIsoRequested);
+                Assert(!Directory.EnumerateFiles(prepared.WorkDirectory, "*.iso*").Any());
+                Assert(phases.Values.All(p => p.Phase is null or ImportPhase.ReadingDisc));
+                SafeFiles.Verify(original!, SafeFiles.ReadTree(Path.Combine(prepared.WorkDirectory, "source"), default));
+            }
+            finally { mounter.DismountAsync(iso).GetAwaiter().GetResult(); }
+        });
     }
 }
 Console.WriteLine($"Failures: {failures}; dummy artifacts: {root}");
@@ -750,6 +879,35 @@ sealed class WaitingScanner : IMalwareScanner
         await Task.Delay(Timeout.Infinite, token);
         throw new Exception("Unreachable");
     }
+}
+
+sealed class CountingScanner : IMalwareScanner
+{
+    public int Calls { get; private set; }
+    public Task<ScanResult> ScanAsync(string directory, int signatureMaxAgeDays, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        Calls++;
+        return Task.FromResult(new ScanResult("Passed", "Synthetic test verdict"));
+    }
+}
+
+sealed class RecordingProgress : IProgress<ImportProgress>
+{
+    public List<ImportProgress> Values { get; } = [];
+    public void Report(ImportProgress value) => Values.Add(value);
+}
+
+sealed class ForbiddenImageBuilder : IImageBuilder
+{
+    public void Build(string sourceDirectory, string outputPath, IProgress<ImportProgress> progress, CancellationToken token) =>
+        throw new Exception("ISO OFF must not invoke the image builder");
+}
+
+sealed class ForbiddenImageMounter : IImageMounter
+{
+    public Task<string> MountAsync(string imagePath, CancellationToken token) => throw new Exception("ISO OFF must not mount an image");
+    public Task DismountAsync(string imagePath) => throw new Exception("ISO OFF must not dismount an image");
 }
 
 sealed class ScriptedService(ServiceState[] states, int[]? startErrors = null, int[]? stopErrors = null) : IServiceControlOperations

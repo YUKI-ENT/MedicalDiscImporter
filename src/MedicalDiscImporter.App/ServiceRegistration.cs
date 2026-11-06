@@ -99,27 +99,21 @@ internal static class ServiceRegistration
         }
     }
 
-    internal static string DescribeState()
+    internal static ServiceRegistrationSnapshot ReadState()
     {
         try
         {
             using var scm = ServiceHandle.OpenManager(1);
             using var service = ServiceHandle.Open(scm, ScanWindowsService.Name, 4);
-            if (service == null) return "サービス未登録：登録・更新を実行してください。";
-            var status = service.Query();
-            return status.State switch
-            {
-                1 => $"サービス停止中（Windowsエラー {status.ExitCode}）：開始または登録・更新を実行してください。",
-                2 => "サービス開始中：しばらく待ってから接続を確認してください。",
-                3 => "サービス停止中の処理を実行しています。",
-                4 => "サービス実行中：検査中、またはアプリとサービスの更新状況を確認してください。",
-                _ => $"サービスの状態：{status.State}（Windowsエラー {status.ExitCode}）"
-            };
+            return service == null ? new(ServiceRegistrationKind.Missing)
+                : new(ServiceRegistrationKind.Installed, service.Query());
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 1072)
-        { return "以前の登録の削除待ち：Windowsの「サービス」管理画面を閉じてから再登録してください。"; }
-        catch (Win32Exception ex) { return $"サービス状態の取得に失敗（Windowsエラー {ex.NativeErrorCode}）。"; }
+        { return new(ServiceRegistrationKind.DeletePending, ErrorCode: ex.NativeErrorCode); }
+        catch (Win32Exception ex) { return new(ServiceRegistrationKind.Unknown, ErrorCode: ex.NativeErrorCode); }
     }
+
+    internal static string DescribeState() => ReadState().Describe();
 
     internal static void ProtectDirectory(string path)
     {
@@ -174,8 +168,8 @@ internal static class ServiceRegistration
         }
         public ServiceState Query()
         {
-            if (!QueryServiceStatus(handle, out var status)) Fail();
-            return new(status.State, status.ExitCode);
+            if (!QueryServiceStatusEx(handle, 0, out var status, Marshal.SizeOf<NativeService.ProcessStatus>(), out _)) Fail();
+            return new(status.Status.State, status.Status.ExitCode, status.ProcessId);
         }
         public int RequestStart() => StartService(handle, 0, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();
         public int RequestStop() => ControlService(handle, 1, out _) ? 0 : Marshal.GetLastWin32Error();

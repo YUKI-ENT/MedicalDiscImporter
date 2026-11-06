@@ -2,7 +2,9 @@ using System.Text.RegularExpressions;
 
 namespace MedicalDiscImporter.Core;
 
-public sealed record ImportProgress(string Stage, int? Percent = null);
+public enum ImportPhase { ReadingDisc, CreatingIso, Scanning, Exporting }
+
+public sealed record ImportProgress(string Stage, int? Percent = null, ImportPhase? Phase = null);
 public sealed record FileRecord(string RelativePath, long Length, string Sha256);
 public sealed record TreeSnapshot(IReadOnlyList<FileRecord> Files, IReadOnlyList<string> Directories)
 {
@@ -27,6 +29,9 @@ public sealed class JobRecord
     public bool Unmounted { get; set; }
     public bool IsoPublished { get; set; }
     public bool DicomPublished { get; set; }
+    public bool CreateIsoRequested { get; set; } = true;
+    public bool ScanRequested { get; set; } = true;
+    public bool DicomSendRequested { get; set; } = true;
     public string? PublishedIsoPath { get; set; }
     public string? PublishedDicomDirectory { get; set; }
     public int DicomCount { get; set; }
@@ -38,7 +43,7 @@ public sealed class JobRecord
     public string Warning { get; init; } = "再構築ISO。原本のトラック・セッション・起動情報等は保持しません。";
 }
 
-public sealed record PrototypeResult(JobRecord Record, string WorkDirectory, string IsoPath);
+public sealed record PrototypeResult(JobRecord Record, string WorkDirectory, string? IsoPath);
 
 public static partial class InputRules
 {

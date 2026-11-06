@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <!-- Release date (yyyyMMdd). Increment the revision for a second release on the same day. -->
+    <ReleaseDate Condition="'$(ReleaseDate)' == ''">20261106</ReleaseDate>
+    <ReleaseRevision Condition="'$(ReleaseRevision)' == ''">0</ReleaseRevision>
+    <_ReleaseRevisionNumber>$([System.Int32]::Parse('$(ReleaseRevision)'))</_ReleaseRevisionNumber>
+    <_ValidatedReleaseDate>$([System.DateTime]::ParseExact('$(ReleaseDate)', 'yyyyMMdd', $([System.Globalization.CultureInfo]::GetCultureInfo(''))).ToString('yyyyMMdd'))</_ValidatedReleaseDate>
+    <_ReleaseYear>$([System.Int32]::Parse('$(ReleaseDate.Substring(0, 4))'))</_ReleaseYear>
+    <_ReleaseMonth>$([System.Int32]::Parse('$(ReleaseDate.Substring(4, 2))'))</_ReleaseMonth>
+    <_ReleaseDay>$([System.Int32]::Parse('$(ReleaseDate.Substring(6, 2))'))</_ReleaseDay>
+    <Version>$(_ReleaseYear).$(_ReleaseMonth).$(_ReleaseDay).$(_ReleaseRevisionNumber)</Version>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion Condition="'$(_ReleaseRevisionNumber)' == '0'">$(ReleaseDate)</InformationalVersion>
+    <InformationalVersion Condition="'$(_ReleaseRevisionNumber)' != '0'">$(ReleaseDate).$(_ReleaseRevisionNumber)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

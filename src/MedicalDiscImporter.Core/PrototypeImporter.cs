@@ -9,18 +9,23 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
         "MedicalDiscImporter", "Quarantine");
 
     public Task<PrototypeResult> RunAsync(string driveRoot, string patientId, IProgress<ImportProgress> progress,
-        CancellationToken token)
+        CancellationToken token, ImportOptions? options = null)
     {
         InputRules.ValidatePatientId(patientId);
+        options ??= new ImportOptions();
+        if (!options.HasAnyOperation) throw new ArgumentException("実行する処理を選んでください。");
         var drive = new DriveInfo(driveRoot);
         if (drive.DriveType != DriveType.CDRom || !drive.IsReady)
             throw new IOException("読み取り可能な光学ディスクを挿入してください。");
-        return Task.Run(() => Run(drive, patientId, progress, token), token);
+        return Task.Run(() => Run(drive, patientId, options, progress, token), token);
     }
 
-    private PrototypeResult Run(DriveInfo source, string patientId, IProgress<ImportProgress> progress, CancellationToken token)
+    private PrototypeResult Run(DriveInfo source, string patientId, ImportOptions options, IProgress<ImportProgress> progress, CancellationToken token)
     {
-        var job = new JobRecord { PatientId = patientId, DiscType = $"Optical/{source.DriveFormat}; tracks/sessions unknown" };
+        var job = new JobRecord { PatientId = patientId, DiscType = $"Optical/{source.DriveFormat}; tracks/sessions unknown",
+            CreateIsoRequested = options.CreateIso, ScanRequested = options.ScanForMalware, DicomSendRequested = options.SendDicom,
+            ImageKind = options.CreateIso ? "Reconstructed" : "None",
+            Warning = options.CreateIso ? "再構築ISO。原本のトラック・セッション・起動情報等は保持しません。" : "ISO作成なし。" };
         var local = new DriveInfo(Path.GetPathRoot(WorkRoot)!);
         if (local.DriveType != DriveType.Fixed || local.DriveFormat != "NTFS")
             throw new IOException("作業領域はローカルNTFSに配置してください。");
@@ -41,19 +46,31 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
             if (SetThreadExecutionState(0x80000001) == 0) throw new IOException("スリープ抑止に失敗しました。");
             sleepSet = true;
             token.ThrowIfCancellationRequested();
-            var required = checked(Math.Min(source.TotalSize, SafeFiles.MaxBytes) * 3 + 2L * 1024 * 1024 * 1024);
+            var required = checked(Math.Min(source.TotalSize, SafeFiles.MaxBytes) * (options.CreateIso ? 3 : 2) + 2L * 1024 * 1024 * 1024);
             if (local.AvailableFreeSpace < required) throw new IOException("作業領域の空き容量が不足しています。");
-            progress.Report(new ImportProgress("ディスクからローカル隔離領域へ読取中"));
+            progress.Report(new ImportProgress("ディスクのファイルを読み込んでいます", Phase: ImportPhase.ReadingDisc));
             var manifest = SafeFiles.ReadTree(source.RootDirectory.FullName, token, tree, progress);
             if (manifest.Files.Count == 0) throw new IOException("データファイルがありません。音楽CD等は未対応です。");
             job.FileCount = manifest.Files.Count;
             job.SourceBytes = manifest.Bytes;
             File.WriteAllText(Path.Combine(work, "manifest.json"), JsonSerializer.Serialize(manifest, JsonOptions));
+            if (!options.CreateIso)
+            {
+                progress.Report(new ImportProgress("読み込んだファイルの内容を照合しています", Phase: ImportPhase.ReadingDisc));
+                var copied = SafeFiles.ReadTree(tree, token, progress: progress);
+                var copyVerification = SafeFiles.Compare(manifest, copied);
+                File.WriteAllText(Path.Combine(work, "verification.json"), JsonSerializer.Serialize(copyVerification, JsonOptions));
+                if (!copyVerification.Matches) throw new ContentVerificationException(copyVerification);
+                job.ContentsVerified = true;
+                job.State = "FilesVerified_NoIso";
+                return new PrototypeResult(job, work, null);
+            }
+            progress.Report(new ImportProgress("ISOを作成しています", Phase: ImportPhase.CreatingIso));
             builder.Build(tree, partial, progress, token);
             token.ThrowIfCancellationRequested();
             job.IsoSha256 = SafeFiles.HashFile(partial, token);
             File.Move(partial, iso, false);
-            progress.Report(new ImportProgress("ISOを読み取り専用マウントして全ファイルを照合中"));
+            progress.Report(new ImportProgress("ISOの内容を照合しています", Phase: ImportPhase.CreatingIso));
             mountAttempted = true;
             var mountedRoot = mounter.MountAsync(iso, token).GetAwaiter().GetResult();
             var actual = SafeFiles.ReadTree(mountedRoot, token, progress: progress);

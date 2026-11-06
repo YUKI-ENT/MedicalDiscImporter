@@ -51,9 +51,21 @@ static class Program
             bitmap.Save(Path.GetFullPath(settingsPath));
             return;
         }
+        if (args is ["--preview-state", var previewState, var previewPath])
+        {
+            using var form = new MainForm();
+            form.ConfigurePreview(previewState);
+            form.Show();
+            Application.DoEvents();
+            using var bitmap = new Bitmap(form.Width, form.Height);
+            form.DrawToBitmap(bitmap, new Rectangle(0, 0, form.Width, form.Height));
+            bitmap.Save(Path.GetFullPath(previewPath));
+            return;
+        }
         if (args is ["--preview", var path])
         {
             using var form = new MainForm();
+            form.ConfigurePreview("waiting");
             form.Show();
             Application.DoEvents();
             using var bitmap = new Bitmap(form.Width, form.Height);

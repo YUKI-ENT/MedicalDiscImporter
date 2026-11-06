@@ -3,7 +3,7 @@ using System.Diagnostics;
 
 namespace MedicalDiscImporter.Core;
 
-public sealed record ServiceState(int State, int ExitCode = 0);
+public sealed record ServiceState(int State, int ExitCode = 0, int ProcessId = 0);
 
 public interface IServiceControlOperations
 {
