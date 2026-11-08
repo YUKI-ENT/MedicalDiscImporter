@@ -511,6 +511,26 @@ public sealed class MainForm : DpiAwareForm
                     $"DICOM：{job.DicomCount:N0}ファイル　撮影日：{string.Join(", ", job.StudyDates)}　取込日で代用：{job.DateFallbackCount:N0}件\r\n"
                     : "DICOM解析・送信：OFF\r\n") +
                 $"隔離作業領域：{imported.WorkDirectory}";
+            if (options.EjectAfterImport && imported.Error == null)
+            {
+                // Import and output are already complete; an eject failure must not change that result.
+                cancel.Enabled = false;
+                var completionText = stage.Text;
+                stage.Text = "取込完了 · ディスクを排出しています";
+                try
+                {
+                    await OpticalDrives.EjectAsync(root);
+                    stage.Text = completionText + " · ディスク排出完了";
+                    result.AppendText("\r\nディスク排出：完了");
+                }
+                catch (Exception ex)
+                {
+                    stage.Text = completionText + " · ディスク排出失敗";
+                    stage.ForeColor = Color.FromArgb(167, 101, 26);
+                    result.AppendText("\r\nディスク排出：失敗。取込は完了しています。手動でディスクを取り出してください。\r\n" + ex.Message);
+                    outputTabs.SelectedTab = detailsTab;
+                }
+            }
         }
         catch (OperationCanceledException)
         {

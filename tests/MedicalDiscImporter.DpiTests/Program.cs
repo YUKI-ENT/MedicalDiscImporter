@@ -105,6 +105,11 @@ internal static class Program
         Check(!settings.IsHandleCreated && settings.DeviceDpi == dpi, $"{dpi}: settings uses same DPI baseline");
         var save = All(settings).OfType<Button>().Single(b => b.Text == "保存");
         Check(save.MinimumSize.Height >= 48 * factor - 1, $"{dpi}: settings save scales once");
+        var eject = All(settings).OfType<CheckBox>().Single(c => c.AccessibleName == "取込完了後のディスク自動排出");
+        Check(!eject.Checked && eject.AutoSize, $"{dpi}: auto eject defaults off with measured layout");
+        using var enabledSettings = new SettingsForm(new ImportOptions { EjectAfterImport = true });
+        Check(All(enabledSettings).OfType<CheckBox>().Single(c => c.AccessibleName == eject.AccessibleName).Checked,
+            $"{dpi}: settings restores auto eject selection");
         var service = All(settings).Single(c => c.GetType().Name == "ScanServicePanel");
         var register = Field<Button>(service, "register");
         Check(Math.Abs(register.MinimumSize.Height - 44 * factor) <= 1,

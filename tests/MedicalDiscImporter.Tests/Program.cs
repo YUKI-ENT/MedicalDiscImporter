@@ -59,6 +59,19 @@ Check("service versions are independent integers and known date releases remain 
     Assert(restored.ServiceVersion == ServiceRelease.DisplayVersion && restored.State == "Ready");
 });
 
+Check("auto eject defaults off for existing settings and round-trips both states", () =>
+{
+    Assert(!new ImportOptions().EjectAfterImport);
+    Assert(!JsonSerializer.Deserialize<ImportOptions>("{}")!.EjectAfterImport);
+    foreach (var enabled in new[] { true, false })
+    {
+        var options = new ImportOptions { EjectAfterImport = enabled };
+        var restored = JsonSerializer.Deserialize<ImportOptions>(JsonSerializer.Serialize(options))!;
+        Assert(restored.EjectAfterImport == enabled);
+        Assert(!(restored with { CreateIso = false, ScanForMalware = false, SendDicom = false }).HasAnyOperation);
+    }
+});
+
 Check("patient ID rejects unsafe and full-width input", () =>
 {
     foreach (var id in new[] { "", "../1", "1~2", "CON", "１２３", "1\n", new string('1', 33) }) Reject<ArgumentException>(() => InputRules.ValidatePatientId(id));

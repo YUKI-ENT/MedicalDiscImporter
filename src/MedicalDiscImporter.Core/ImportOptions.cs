@@ -13,6 +13,7 @@ public sealed record ImportOptions
     public bool CreateIso { get; init; } = true;
     public bool ScanForMalware { get; init; } = true;
     public bool SendDicom { get; init; } = true;
+    public bool EjectAfterImport { get; init; }
     [JsonIgnore] public bool HasAnyOperation => CreateIso || ScanForMalware || SendDicom;
 
     private IEnumerable<string> OutputDirectories()
