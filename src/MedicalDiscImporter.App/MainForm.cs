@@ -451,6 +451,10 @@ public sealed class MainForm : DpiAwareForm
         }
         var scanNotice = options.ScanForMalware ? "ウイルス検査合格後に、選択した出力を実行します。" : "ウイルススキャンOFF：未検査で選択した出力を実行します。";
         if (MessageBox.Show(this, $"患者ID：{patient.Text}\r\nドライブ：{root}\r\n{scanNotice}\r\nISOイメージ：{(options.CreateIso ? options.IsoDirectory + "（検査名：" + options.IsoExamName + "／取込日）" : "OFF")}\r\nDICOM送信：{(options.SendDicom ? options.DicomDirectory : "OFF")}\r\nDICOM検査名：{options.RsBaseExamName}", "開始確認", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        var notificationTitle = "取り込み失敗";
+        var notificationIcon = MessageBoxIcon.Error;
+        string? notificationDetail = null;
+        var ejectFailed = false;
         try
         {
             busy = true;
@@ -467,9 +471,10 @@ public sealed class MainForm : DpiAwareForm
             stage.ForeColor = Accent;
             cancellation = new CancellationTokenSource();
             var operation = cancellation;
+            var acceptingProgress = true;
             var reporter = new Progress<ImportProgress>(p =>
             {
-                if (!busy || !ReferenceEquals(cancellation, operation) || operation.IsCancellationRequested) return;
+                if (!acceptingProgress || !busy || !ReferenceEquals(cancellation, operation) || operation.IsCancellationRequested) return;
                 if (p.Phase is { } phase) journey.MoveTo(phase);
                 stage.Text = p.Stage + (p.Percent.HasValue ? $" · {Math.Clamp(p.Percent.Value, 0, 100)}%" : "");
             });
@@ -485,10 +490,11 @@ public sealed class MainForm : DpiAwareForm
                 if (busy && ReferenceEquals(cancellation, operation)) ShowDicoms(entries);
             });
             var imported = await new ImportPipeline(new ServiceMalwareScanner()).CompleteAsync(completed, options, reporter, cancellation.Token, catalogProgress);
+            acceptingProgress = false;
+            cancel.Enabled = false;
             var job = imported.Record;
             ShowDicoms(imported.Dicoms);
-            if (imported.Error == null) journey.Finish();
-            else
+            if (imported.Error != null)
             {
                 journey.Stop(job.State == "Cancelled" || operation.IsCancellationRequested);
                 stage.ForeColor = Color.FromArgb(183, 68, 55);
@@ -525,15 +531,36 @@ public sealed class MainForm : DpiAwareForm
                 }
                 catch (Exception ex)
                 {
+                    ejectFailed = true;
                     stage.Text = completionText + " · ディスク排出失敗";
                     stage.ForeColor = Color.FromArgb(167, 101, 26);
                     result.AppendText("\r\nディスク排出：失敗。取込は完了しています。手動でディスクを取り出してください。\r\n" + ex.Message);
                     outputTabs.SelectedTab = detailsTab;
                 }
             }
+            if (imported.Error == null)
+            {
+                journey.Finish();
+                notificationTitle = "取り込み完了";
+                notificationIcon = MessageBoxIcon.Information;
+                if (ejectFailed)
+                {
+                    notificationIcon = MessageBoxIcon.Warning;
+                    notificationDetail = "ディスクを手動で取り出してください。";
+                }
+            }
+            else
+            {
+                notificationTitle = job.State == "PartialOutput" ? "取り込み未完了（一部出力済み）"
+                    : job.State == "Cancelled" ? "取り込み中止" : "取り込み失敗";
+                notificationIcon = job.State == "Cancelled" ? MessageBoxIcon.Information : MessageBoxIcon.Warning;
+                notificationDetail = imported.Error;
+            }
         }
         catch (OperationCanceledException)
         {
+            notificationTitle = "取り込み中止";
+            notificationIcon = MessageBoxIcon.Information;
             journey.Stop(true);
             stage.ForeColor = Color.FromArgb(183, 68, 55);
             stage.Text = "中止しました";
@@ -543,6 +570,8 @@ public sealed class MainForm : DpiAwareForm
         }
         catch (ContentVerificationException ex)
         {
+            notificationTitle = "取り込み失敗（照合不合格）";
+            notificationDetail = ex.Message;
             stage.Text = options.CreateIso ? "ISOファイル作成済み・内容照合不合格" : "ファイル読込・コピー照合不合格";
             journey.Stop(false);
             stage.ForeColor = Color.FromArgb(183, 68, 55);
@@ -552,6 +581,7 @@ public sealed class MainForm : DpiAwareForm
         }
         catch (Exception ex)
         {
+            notificationDetail = ex.Message;
             stage.Text = "処理失敗・記録と出力先を確認してください";
             journey.Stop(false);
             stage.ForeColor = Color.FromArgb(183, 68, 55);
@@ -573,6 +603,10 @@ public sealed class MainForm : DpiAwareForm
                 await RefreshDrivesAsync();
             }
         }
+        if (!IsDisposed && !Disposing)
+            MessageBox.Show(this, stage.Text + (notificationDetail == null ? "" : "\r\n" + notificationDetail)
+                + "\r\n\r\n結果は画面の一覧・保存先・検査の詳細で確認できます。",
+                notificationTitle, MessageBoxButtons.OK, notificationIcon);
     }
 
     private void ShowSettings()

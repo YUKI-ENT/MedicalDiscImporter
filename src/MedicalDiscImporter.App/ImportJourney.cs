@@ -6,11 +6,11 @@ namespace MedicalDiscImporter.App;
 // The highlighted station follows explicit engine phases, never percentages or translated messages.
 internal sealed class ImportJourney : Control
 {
-    private static readonly string[] Stations = ["ディスク読込", "ISO作成・照合", "ウイルス検査", "ISO・DICOM出力"];
+    private static readonly string[] Stations = ["ディスク読込", "ISO作成・照合", "ウイルス検査", "ISO・DICOM出力", "完了"];
     private int current = -1;
     private bool complete;
     private string? stopped;
-    private readonly bool[] skipped = new bool[4];
+    private readonly bool[] skipped = new bool[Stations.Length];
     private string outputTitle = Stations[3];
     private static readonly Color Accent = Color.FromArgb(8, 125, 137);
 
@@ -37,7 +37,7 @@ internal sealed class ImportJourney : Control
     }
     public void MoveTo(ImportPhase phase)
     {
-        if ((int)phase <= current || skipped[(int)phase]) return;
+        if (complete || stopped != null || (int)phase <= current || skipped[(int)phase]) return;
         current = Math.Max(current, (int)phase);
         UpdateDescription();
     }
@@ -58,7 +58,7 @@ internal sealed class ImportJourney : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var scale = DeviceDpi / 96f;
-        var cell = ClientSize.Width / 4f;
+        var cell = ClientSize.Width / (float)Stations.Length;
         var y = 25 * scale;
         var radius = 15 * scale;
         var muted = Color.FromArgb(208, 219, 228);

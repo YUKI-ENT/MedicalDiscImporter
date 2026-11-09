@@ -91,6 +91,7 @@ internal static class Program
         Check(Field<Control>(main, "start").Height >= 44 * factor - 1, $"{dpi}: start remains touch-sized");
         Check(Field<Control>(main, "cancel").Height >= 44 * factor - 1, $"{dpi}: cancel remains touch-sized");
         Check(Field<Control>(main, "journey").Height >= 104 * factor - 1, $"{dpi}: station captions and states fit");
+        CheckJourney(Field<Control>(main, "journey"));
         var title = All(main).OfType<Label>().Single(l => l.Text == "MedicalDiscImporter");
         var instruction = All(main).OfType<Label>().Single(l => l.Text.StartsWith("患者IDとディスク"));
         Check(title.AutoSize && instruction.AutoSize && Within(title, root).Bottom <= Within(instruction, root).Top,
@@ -116,6 +117,39 @@ internal static class Program
             $"{dpi}: inherited service panel does not double-scale");
         Console.WriteLine($"DPI {dpi}: {checks} checks passed");
         return 0;
+    }
+    private static void CheckJourney(Control journey)
+    {
+        void Call(string method, params object[] arguments) => journey.GetType().GetMethod(method)!.Invoke(journey, arguments);
+        foreach (var options in new[]
+        {
+            new ImportOptions(),
+            new ImportOptions { CreateIso = false, ScanForMalware = true, SendDicom = false },
+            new ImportOptions { CreateIso = true, ScanForMalware = false, SendDicom = false },
+            new ImportOptions { CreateIso = false, ScanForMalware = false, SendDicom = true }
+        })
+        {
+            Call("Configure", options);
+            Call("Reset");
+            foreach (var phase in Enum.GetValues<ImportPhase>()) Call("MoveTo", phase);
+            Check(journey.AccessibleName!.EndsWith("完了：未着手"), "last station stays unlit throughout processing and output");
+            Call("Stop", false);
+            Check(journey.AccessibleName!.EndsWith("完了：未着手"), "failure does not light completion");
+            Call("Reset");
+            Call("MoveTo", ImportPhase.ReadingDisc);
+            Call("Stop", true);
+            Call("MoveTo", ImportPhase.Exporting);
+            Check(journey.AccessibleName!.Contains("ディスク読込：中止") && journey.AccessibleName.EndsWith("完了：未着手"),
+                "cancellation stays stopped despite delayed progress");
+            Call("Reset");
+            Call("Finish");
+            Call("MoveTo", ImportPhase.Exporting);
+            Check(journey.AccessibleName!.EndsWith("完了：完了"), "only successful finish lights completion, including skipped operations");
+            Call("Reset");
+            Check(journey.AccessibleName!.EndsWith("完了：未着手"), "next import clears completion");
+        }
+        Call("Configure", new ImportOptions());
+        Call("Reset");
     }
     private static int CheckViewport()
     {
