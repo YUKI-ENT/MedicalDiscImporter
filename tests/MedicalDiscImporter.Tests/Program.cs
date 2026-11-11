@@ -2,6 +2,16 @@ using MedicalDiscImporter.Core;
 using FellowOakDicom;
 using System.Text.Json;
 
+if (args is ["--cleanup-crash-worker", var crashRoot])
+{
+    using var crashWorkspace = ImportWorkspace.Create(crashRoot);
+    File.WriteAllText(Path.Combine(crashWorkspace.DirectoryPath, "patient.dcm"), "dummy patient bytes");
+    Console.WriteLine(crashWorkspace.DirectoryPath);
+    Console.Out.Flush();
+    Thread.Sleep(Timeout.Infinite);
+    return 0;
+}
+
 var failures = 0;
 void Check(string name, Action test)
 {
@@ -226,14 +236,14 @@ Check("cancellation interrupts catalog", () =>
     Reject<OperationCanceledException>(() => new DicomCatalog().Read(dicomRoot, dicomManifest, new(2026, 11, 5), quiet, cts.Token));
 });
 
-(PrototypeResult Source, ImportOptions Options) Fixture(string name, DateTimeOffset? started = null)
+(PrototypeResult Source, ImportOptions Options) Fixture(string name, DateTimeOffset? started = null, ImportWorkspace? workspace = null)
 {
-    var work = Path.Combine(root, name, "work"); Directory.CreateDirectory(work);
+    var work = workspace?.DirectoryPath ?? Path.Combine(root, name, "work"); Directory.CreateDirectory(work);
     var tree = Path.Combine(work, "source"); Directory.CreateDirectory(tree);
     var snapshot = SafeFiles.ReadTree(dicomRoot, default, tree);
     File.WriteAllText(Path.Combine(work, "manifest.json"), JsonSerializer.Serialize(snapshot));
     var iso = Path.Combine(work, "test.iso"); File.WriteAllText(iso, "dummy ISO bytes; no mounting in this test");
-    var job = new JobRecord { PatientId = "00123", Started = started ?? DateTimeOffset.Now, ContentsVerified = true, Unmounted = true, IsoSha256 = SafeFiles.HashFile(iso, default) };
+    var job = new JobRecord { JobId = workspace?.JobId ?? Guid.NewGuid().ToString("N"), PatientId = "00123", Started = started ?? DateTimeOffset.Now, ContentsVerified = true, Unmounted = true, IsoSha256 = SafeFiles.HashFile(iso, default) };
     return (new(job, work, iso), new() { IsoDirectory = Path.Combine(root, name, "iso"), DicomDirectory = Path.Combine(root, name, "dicom") });
 }
 ImportResult Complete((PrototypeResult Source, ImportOptions Options) f, IMalwareScanner scan, CancellationToken token = default) =>
@@ -546,6 +556,7 @@ Check("RSB cancellation after first rename preserves an auditable partial handof
     var ledger = JsonSerializer.Deserialize<List<RsBaseOutput>>(File.ReadAllText(Path.Combine(f.Source.WorkDirectory, "rsbase-output.json")))!;
     Assert(published == 1 && ledger.Count(e => e.State == "Published") == 1 &&
         Directory.GetFiles(f.Options.DicomDirectory, "*~RSB.dcm").Length == 1);
+    Assert(!Directory.EnumerateDirectories(Path.Combine(f.Options.DicomDirectory, ".MedicalDiscImporter", "staging")).Any());
 });
 Check("corrupt RSB sequence metadata blocks handoff without resetting numbers", () =>
 {
@@ -928,16 +939,38 @@ if (args.Contains("--imapi"))
             }
             finally { mounter.DismountAsync(iso).GetAwaiter().GetResult(); }
         });
+        Check("startup recovery dismounts and deletes a real Windows-mounted orphan ISO", () =>
+        {
+            var workRoot = Path.Combine(root, "cleanup-real-mount");
+            var workspace = ImportWorkspace.Create(workRoot);
+            var image = Path.Combine(workspace.DirectoryPath, "disc.iso");
+            File.Copy(Path.Combine(root, "dummy.iso"), image);
+            File.WriteAllText(Path.Combine(workspace.DirectoryPath, ".mount-pending"), "");
+            var mounter = new WindowsImageMounter();
+            try
+            {
+                mounter.MountAsync(image, default).GetAwaiter().GetResult();
+                workspace.Dispose();
+                Assert(ImportWorkspace.RecoverAsync(mounter, workRoot).GetAwaiter().GetResult() == 0);
+                Assert(!Directory.Exists(workspace.DirectoryPath));
+            }
+            finally
+            {
+                workspace.Dispose();
+                if (File.Exists(image)) mounter.DismountAsync(image).GetAwaiter().GetResult();
+            }
+        });
         Check("ISO off reads and verifies a dummy disc without building or mounting another image", () =>
         {
             var mounter = new WindowsImageMounter();
             var iso = Path.Combine(root, "dummy.iso");
+            using var workspace = ImportWorkspace.Create(Path.Combine(root, "cleanup-real-reader"));
             try
             {
                 var mounted = mounter.MountAsync(iso, default).GetAwaiter().GetResult();
                 var phases = new RecordingProgress();
                 var prepared = new PrototypeImporter(new ForbiddenImageBuilder(), new ForbiddenImageMounter())
-                    .RunAsync(mounted, "000123", phases, default, new ImportOptions { CreateIso = false, ScanForMalware = false })
+                    .RunAsync(mounted, "000123", phases, default, new ImportOptions { CreateIso = false, ScanForMalware = false }, workspace)
                     .GetAwaiter().GetResult();
                 Assert(prepared.IsoPath == null && prepared.Record.IsoSha256 == null && prepared.Record.ContentsVerified && !prepared.Record.Unmounted);
                 Assert(prepared.Record.ImageKind == "None" && !prepared.Record.CreateIsoRequested);
@@ -945,10 +978,175 @@ if (args.Contains("--imapi"))
                 Assert(phases.Values.All(p => p.Phase is null or ImportPhase.ReadingDisc));
                 SafeFiles.Verify(original!, SafeFiles.ReadTree(Path.Combine(prepared.WorkDirectory, "source"), default));
             }
-            finally { mounter.DismountAsync(iso).GetAwaiter().GetResult(); }
+            finally
+            {
+                mounter.DismountAsync(iso).GetAwaiter().GetResult();
+                Assert(workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+            }
         });
     }
 }
+Check("startup recovers work after an actual worker process is forcibly killed", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-killed-worker");
+    var start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!)
+    {
+        UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+    };
+    if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
+        start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+    start.ArgumentList.Add("--cleanup-crash-worker"); start.ArgumentList.Add(workRoot);
+    using var child = System.Diagnostics.Process.Start(start)!;
+    try
+    {
+        var directory = child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult()!;
+        Assert(Path.GetDirectoryName(directory) == workRoot && File.Exists(Path.Combine(directory, "patient.dcm")));
+        Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+        Assert(Directory.Exists(directory));
+        child.Kill(true); Assert(child.WaitForExit(10000));
+        Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+        Assert(!Directory.Exists(directory));
+    }
+    finally { if (!child.HasExited) { child.Kill(true); child.WaitForExit(); } }
+});
+foreach (var verdict in new[] { "Passed", "ThreatDetected", "Unknown", "Cancelled" })
+    Check($"workspace removes patient files and reports after pipeline {verdict}", () =>
+    {
+        var workRoot = Path.Combine(root, "cleanup-pipeline-" + verdict);
+        using var workspace = ImportWorkspace.Create(workRoot);
+        var fixture = Fixture("cleanup-output-" + verdict, workspace: workspace);
+        var imported = Complete(fixture, new StubScanner(verdict));
+        Assert(workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+        Assert(!Directory.Exists(workspace.DirectoryPath));
+        Assert(imported.Record.ScanState == verdict);
+        if (verdict == "Passed")
+        {
+            Assert(File.Exists(imported.Record.PublishedIsoPath));
+            Assert(Directory.GetFiles(fixture.Options.DicomDirectory, "*~RSB.dcm").Length == 3);
+            Assert(File.Exists(Path.Combine(fixture.Options.DicomDirectory, ".MedicalDiscImporter", "sequence.json")));
+        }
+    });
+Check("workspace cleanup runs independently of cancellation and removes read-only files", () =>
+{
+    using var workspace = ImportWorkspace.Create(Path.Combine(root, "cleanup-cancel"));
+    var fixture = Fixture("cleanup-cancel-output", workspace: workspace);
+    using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+    var imported = Complete(fixture, new StubScanner("Passed"), cancelled.Token);
+    Assert(imported.Record.State == "Cancelled");
+    var secret = Path.Combine(workspace.DirectoryPath, "readonly.dcm");
+    File.WriteAllText(secret, "dummy patient bytes"); File.SetAttributes(secret, FileAttributes.ReadOnly);
+    Assert(workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+    Assert(!Directory.Exists(workspace.DirectoryPath));
+});
+Check("startup recovery skips a live lease and recovers it after process ownership ends", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-lease");
+    var workspace = ImportWorkspace.Create(workRoot);
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "patient.json"), "dummy");
+    Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+    Assert(Directory.Exists(workspace.DirectoryPath));
+    workspace.Dispose();
+    Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+    Assert(!Directory.Exists(workspace.DirectoryPath));
+});
+Check("recovery dismounts an interrupted ISO and removes shared pending bytes without touching final output or another job", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-recover");
+    var destination = Path.Combine(root, "cleanup-shared");
+    var workspace = ImportWorkspace.Create(workRoot);
+    ImportWorkspace.RegisterOutput(workspace.DirectoryPath, destination, workspace.JobId);
+    var stagingRoot = Path.Combine(destination, ".MedicalDiscImporter", "staging");
+    var staging = Path.Combine(stagingRoot, workspace.JobId);
+    Directory.CreateDirectory(staging); File.WriteAllText(Path.Combine(staging, "00000000.pending"), "dummy");
+    var other = Path.Combine(stagingRoot, Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(other); File.WriteAllText(Path.Combine(other, "other.pending"), "another job");
+    var final = Path.Combine(destination, "00123~000001~2026_11_11~CTMRI~RSB.dcm");
+    File.WriteAllText(final, "published");
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "disc.iso"), "dummy iso");
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, ".mount-pending"), "");
+    workspace.Dispose();
+    var mounter = new CleanupMounter();
+    Assert(ImportWorkspace.RecoverAsync(mounter, workRoot).GetAwaiter().GetResult() == 0);
+    Assert(mounter.Dismounts == 1 && !Directory.Exists(workspace.DirectoryPath) && !Directory.Exists(staging));
+    Assert(File.ReadAllText(final) == "published" && File.Exists(Path.Combine(other, "other.pending")));
+});
+Check("unavailable destination preserves only retry instructions and cleans pending data after reconnect", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-disconnected");
+    var workspace = ImportWorkspace.Create(workRoot);
+    var destination = Path.Combine(root, "cleanup-reconnected-share");
+    ImportWorkspace.RegisterOutput(workspace.DirectoryPath, destination, workspace.JobId);
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "patient.dcm"), "dummy");
+    Assert(!workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+    Assert(!File.Exists(Path.Combine(workspace.DirectoryPath, "patient.dcm")));
+    Assert(File.Exists(Path.Combine(workspace.DirectoryPath, "cleanup-outputs.json")));
+    workspace.Dispose();
+    var staging = Path.Combine(destination, ".MedicalDiscImporter", "staging", workspace.JobId);
+    Directory.CreateDirectory(staging); File.WriteAllText(Path.Combine(staging, "00000000.pending"), "dummy");
+    Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+    Assert(!Directory.Exists(workspace.DirectoryPath) && !Directory.Exists(staging));
+});
+Check("dismount failure still removes copied patient files and retries only the ISO on next recovery", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-mount-fail");
+    var workspace = ImportWorkspace.Create(workRoot);
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "disc.iso"), "dummy iso");
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, ".mount-pending"), "");
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "job.json"), "dummy patient record");
+    var tree = Path.Combine(workspace.DirectoryPath, "source"); Directory.CreateDirectory(tree);
+    File.WriteAllText(Path.Combine(tree, "image.dcm"), "dummy");
+    Assert(!workspace.CleanupAsync(new CleanupMounter { Fail = true }).GetAwaiter().GetResult());
+    Assert(File.Exists(Path.Combine(workspace.DirectoryPath, "disc.iso")) && !Directory.Exists(tree));
+    Assert(!File.Exists(Path.Combine(workspace.DirectoryPath, "job.json")));
+    workspace.Dispose();
+    Assert(ImportWorkspace.RecoverAsync(new CleanupMounter(), workRoot).GetAwaiter().GetResult() == 0);
+    Assert(!Directory.Exists(workspace.DirectoryPath));
+});
+Check("locked files leave a visible cleanup failure and are retried after release", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-lock-fail");
+    var workspace = ImportWorkspace.Create(workRoot);
+    var secret = Path.Combine(workspace.DirectoryPath, "locked.dcm");
+    File.WriteAllText(secret, "dummy");
+    using (var held = new FileStream(secret, FileMode.Open, FileAccess.Read, FileShare.None))
+        Assert(!workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+    workspace.Dispose();
+    Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+    Assert(!Directory.Exists(workspace.DirectoryPath));
+});
+Check("cleanup rejects paths outside its parent and leaves non-job directories untouched", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-bounds"); Directory.CreateDirectory(workRoot);
+    var unrelated = Path.Combine(workRoot, "settings"); Directory.CreateDirectory(unrelated);
+    var secret = Path.Combine(unrelated, "keep.json"); File.WriteAllText(secret, "keep");
+    Reject<IOException>(() => SafeFiles.DeleteOwnedDirectory(unrelated, Path.Combine(root, "different-parent")));
+    Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 1);
+    Assert(File.ReadAllText(secret) == "keep");
+});
+Check("cleanup rejects a junction without following it and removes other patient copies", () =>
+{
+    using var workspace = ImportWorkspace.Create(Path.Combine(root, "cleanup-junction"));
+    var link = Path.Combine(workspace.DirectoryPath, "junction");
+    var start = new System.Diagnostics.ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+    foreach (var arg in new[] { "/c", "mklink", "/J", link, source }) start.ArgumentList.Add(arg);
+    using var process = System.Diagnostics.Process.Start(start)!;
+    process.StandardOutput.ReadToEnd(); process.WaitForExit(); Assert(process.ExitCode == 0);
+    var copy = Path.Combine(workspace.DirectoryPath, "copy.dcm"); File.WriteAllText(copy, "dummy");
+    Assert(!workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+    Assert(File.Exists(Path.Combine(source, "zero.dat")) && !File.Exists(copy));
+    Directory.Delete(link); // Remove the junction itself, never its target.
+    Assert(workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+});
+Check("damaged cleanup journal cannot redirect deletion to final output", () =>
+{
+    using var workspace = ImportWorkspace.Create(Path.Combine(root, "cleanup-invalid-journal"));
+    var final = Path.Combine(root, "keep-final.dcm"); File.WriteAllText(final, "keep");
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "cleanup-outputs.json"), JsonSerializer.Serialize(new[] { final }));
+    Assert(!workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+    Assert(File.ReadAllText(final) == "keep");
+    File.Delete(Path.Combine(workspace.DirectoryPath, "cleanup-outputs.json"));
+    Assert(workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+});
 Console.WriteLine($"Failures: {failures}; dummy artifacts: {root}");
 return failures == 0 ? 0 : 1;
 
@@ -1022,5 +1220,18 @@ sealed class ScriptedService(ServiceState[] states, int[]? startErrors = null, i
         var error = stopErrors?.ElementAtOrDefault(Stops) ?? 0;
         Stops++;
         return error;
+    }
+}
+
+sealed class CleanupMounter : IImageMounter
+{
+    public int Dismounts { get; private set; }
+    public bool Fail { get; init; }
+    public Task<string> MountAsync(string imagePath, CancellationToken token) => throw new NotSupportedException();
+    public Task DismountAsync(string imagePath)
+    {
+        Dismounts++;
+        if (Fail) throw new IOException("Synthetic dismount failure");
+        return Task.CompletedTask;
     }
 }

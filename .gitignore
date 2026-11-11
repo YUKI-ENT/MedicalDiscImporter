@@ -7,3 +7,7 @@ artifacts/
 *.suo
 *.iso
 *.partial
+
+# Private signing material
+*.pfx
+*.p12

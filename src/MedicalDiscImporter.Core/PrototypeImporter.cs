@@ -9,7 +9,7 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
         "MedicalDiscImporter", "Quarantine");
 
     public Task<PrototypeResult> RunAsync(string driveRoot, string patientId, IProgress<ImportProgress> progress,
-        CancellationToken token, ImportOptions? options = null)
+        CancellationToken token, ImportOptions? options = null, ImportWorkspace? workspace = null)
     {
         InputRules.ValidatePatientId(patientId);
         options ??= new ImportOptions();
@@ -17,12 +17,12 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
         var drive = new DriveInfo(driveRoot);
         if (drive.DriveType != DriveType.CDRom || !drive.IsReady)
             throw new IOException("読み取り可能な光学ディスクを挿入してください。");
-        return Task.Run(() => Run(drive, patientId, options, progress, token), token);
+        return Task.Run(() => Run(drive, patientId, options, progress, token, workspace), token);
     }
 
-    private PrototypeResult Run(DriveInfo source, string patientId, ImportOptions options, IProgress<ImportProgress> progress, CancellationToken token)
+    private PrototypeResult Run(DriveInfo source, string patientId, ImportOptions options, IProgress<ImportProgress> progress, CancellationToken token, ImportWorkspace? workspace)
     {
-        var job = new JobRecord { PatientId = patientId, DiscType = $"Optical/{source.DriveFormat}; tracks/sessions unknown",
+        var job = new JobRecord { JobId = workspace?.JobId ?? Guid.NewGuid().ToString("N"), PatientId = patientId, DiscType = $"Optical/{source.DriveFormat}; tracks/sessions unknown",
             CreateIsoRequested = options.CreateIso, ScanRequested = options.ScanForMalware, DicomSendRequested = options.SendDicom,
             ImageKind = options.CreateIso ? "Reconstructed" : "None",
             Warning = options.CreateIso ? "再構築ISO。原本のトラック・セッション・起動情報等は保持しません。" : "ISO作成なし。" };
@@ -32,7 +32,7 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
         var appRoot = Path.GetDirectoryName(WorkRoot)!;
         SafeFiles.CreatePrivateDirectory(appRoot);
         SafeFiles.CreatePrivateDirectory(WorkRoot);
-        var work = Path.Combine(WorkRoot, job.JobId);
+        var work = workspace?.DirectoryPath ?? Path.Combine(WorkRoot, job.JobId);
         SafeFiles.CreatePrivateDirectory(work);
         var tree = Path.Combine(work, "source");
         Directory.CreateDirectory(tree);
@@ -71,6 +71,7 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
             job.IsoSha256 = SafeFiles.HashFile(partial, token);
             File.Move(partial, iso, false);
             progress.Report(new ImportProgress("ISOの内容を照合しています", Phase: ImportPhase.CreatingIso));
+            File.WriteAllText(Path.Combine(work, ".mount-pending"), "");
             mountAttempted = true;
             var mountedRoot = mounter.MountAsync(iso, token).GetAwaiter().GetResult();
             var actual = SafeFiles.ReadTree(mountedRoot, token, progress: progress);
@@ -100,6 +101,7 @@ public sealed class PrototypeImporter(IImageBuilder builder, IImageMounter mount
                     // Cleanup ignores user cancellation. Failure is visible and never counted as success.
                     mounter.DismountAsync(iso).GetAwaiter().GetResult();
                     job.Unmounted = true;
+                    File.Delete(Path.Combine(work, ".mount-pending"));
                 }
             }
             catch (Exception ex)

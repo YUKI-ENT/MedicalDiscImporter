@@ -21,7 +21,7 @@ public sealed record VerificationReport(IReadOnlyList<VerificationDifference> Di
 }
 
 public sealed class ContentVerificationException(VerificationReport report)
-    : IOException("ISO内容不一致：" + report.Summary + "。詳細は作業領域のverification.jsonを確認してください。")
+    : IOException("ファイル内容不一致：" + report.Summary + "。出力を停止しました。")
 {
     public VerificationReport Report { get; } = report;
 }

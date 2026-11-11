@@ -62,71 +62,78 @@ public static class RsBasePublisher
         CreateDirectory(stagingRoot);
         var staging = Path.Combine(stagingRoot, jobId);
         if (Directory.Exists(staging)) throw new IOException("RSBase出力の準備領域が既に存在します。");
+        ImportWorkspace.RegisterOutput(workDirectory, root, jobId);
         CreateDirectory(staging);
-        for (var i = 0; i < ordered.Length; i++)
+        try
         {
-            token.ThrowIfCancellationRequested();
-            var entry = ordered[i];
-            ImportPipeline.CopyVerified(Path.Combine(source, entry.RelativePath), PendingPath(staging, i), entry.File, token);
-            if ((i + 1) % 50 == 0) progress.Report(new($"RSBase出力準備中：{i + 1:N0}/{ordered.Length:N0}", (i + 1) * 100 / ordered.Length));
-        }
-        token.ThrowIfCancellationRequested();
-        using var lease = AcquireLock(Path.Combine(metadata, "sequence.lock"), token);
-        var statePath = Path.Combine(metadata, "sequence.json");
-        var counters = ReadCounters(statePath);
-        // Include existing files from other producers and legacy imports, across exam names.
-        foreach (var path in Directory.EnumerateFileSystemEntries(root))
-        {
-            token.ThrowIfCancellationRequested();
-            var parts = Path.GetFileName(path).Split('~');
-            if (parts.Length != 5 || parts[0] != patientId ||
-                !(parts[4].Equals("RSB.dcm", StringComparison.OrdinalIgnoreCase) || parts[4].Equals("RSB.iso", StringComparison.OrdinalIgnoreCase)) ||
-                parts[1].Length < 6 || !parts[1].All(char.IsAsciiDigit) ||
-                !DateOnly.TryParseExact(parts[2], "yyyy_MM_dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) continue;
-            if (!long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var ordinal))
-                throw new IOException("既存のRSBase連番が扱える範囲を超えています。");
-            var key = Key(patientId, date);
-            counters[key] = Math.Max(counters.GetValueOrDefault(key), ordinal);
-        }
-        var ledger = new List<RsBaseOutput>();
-        foreach (var entry in ordered)
-            ledger.Add(new(entry.RelativePath, FormatName(patientId, Next(counters, Key(patientId, entry.StudyDate)),
-                entry.StudyDate, examName, extension), entry.File.Sha256, "Reserved"));
-        // Reserve the entire range durably BEFORE any watched filename becomes visible. Even if
-        // the watcher immediately consumes files, later jobs/machines will not reuse these numbers.
-        WriteJson(statePath, counters);
-        var ledgerPath = Path.Combine(workDirectory, ledgerName);
-        WriteJson(ledgerPath, ledger);
-        for (var i = 0; i < ordered.Length; i++)
-        {
-            token.ThrowIfCancellationRequested();
-            while (true)
+            for (var i = 0; i < ordered.Length; i++)
             {
-                ledger[i] = ledger[i] with { State = "Publishing" };
-                WriteJson(ledgerPath, ledger);
-                var target = Path.Combine(root, ledger[i].FileName);
-                try { File.Move(PendingPath(staging, i), target, false); }
-                catch (IOException) when (File.Exists(target) || Directory.Exists(target))
-                {
-                    // An external producer may not use our lock. Reserve another number, never overwrite.
-                    token.ThrowIfCancellationRequested();
-                    // Move the remaining range for this day forward as a unit, preserving stable image order.
-                    for (var j = i; j < ordered.Length; j++)
-                        if (ordered[j].StudyDate == ordered[i].StudyDate)
-                            ledger[j] = ledger[j] with { FileName = FormatName(patientId,
-                                Next(counters, Key(patientId, ordered[j].StudyDate)), ordered[j].StudyDate, examName, extension), State = "Reserved" };
-                    WriteJson(statePath, counters);
-                    continue;
-                }
-                ledger[i] = ledger[i] with { State = "Published" };
-                // Callback updates the job immediately; the watcher may already have moved the file.
-                filePublished(target);
-                WriteJson(ledgerPath, ledger);
-                break;
+                token.ThrowIfCancellationRequested();
+                var entry = ordered[i];
+                ImportPipeline.CopyVerified(Path.Combine(source, entry.RelativePath), PendingPath(staging, i), entry.File, token);
+                if ((i + 1) % 50 == 0) progress.Report(new($"RSBase出力準備中：{i + 1:N0}/{ordered.Length:N0}", (i + 1) * 100 / ordered.Length));
             }
-            if ((i + 1) % 50 == 0) progress.Report(new($"RSBaseへ受け渡し中：{i + 1:N0}/{ordered.Length:N0}", (i + 1) * 100 / ordered.Length));
+            token.ThrowIfCancellationRequested();
+            using var lease = AcquireLock(Path.Combine(metadata, "sequence.lock"), token);
+            var statePath = Path.Combine(metadata, "sequence.json");
+            var counters = ReadCounters(statePath);
+            // Include existing files from other producers and legacy imports, across exam names.
+            foreach (var path in Directory.EnumerateFileSystemEntries(root))
+            {
+                token.ThrowIfCancellationRequested();
+                var parts = Path.GetFileName(path).Split('~');
+                if (parts.Length != 5 || parts[0] != patientId ||
+                    !(parts[4].Equals("RSB.dcm", StringComparison.OrdinalIgnoreCase) || parts[4].Equals("RSB.iso", StringComparison.OrdinalIgnoreCase)) ||
+                    parts[1].Length < 6 || !parts[1].All(char.IsAsciiDigit) ||
+                    !DateOnly.TryParseExact(parts[2], "yyyy_MM_dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) continue;
+                if (!long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var ordinal))
+                    throw new IOException("既存のRSBase連番が扱える範囲を超えています。");
+                var key = Key(patientId, date);
+                counters[key] = Math.Max(counters.GetValueOrDefault(key), ordinal);
+            }
+            var ledger = new List<RsBaseOutput>();
+            foreach (var entry in ordered)
+                ledger.Add(new(entry.RelativePath, FormatName(patientId, Next(counters, Key(patientId, entry.StudyDate)),
+                    entry.StudyDate, examName, extension), entry.File.Sha256, "Reserved"));
+            // Reserve the entire range durably BEFORE any watched filename becomes visible. Even if
+            // the watcher immediately consumes files, later jobs/machines will not reuse these numbers.
+            WriteJson(statePath, counters);
+            var ledgerPath = Path.Combine(workDirectory, ledgerName);
+            WriteJson(ledgerPath, ledger);
+            for (var i = 0; i < ordered.Length; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                while (true)
+                {
+                    ledger[i] = ledger[i] with { State = "Publishing" };
+                    WriteJson(ledgerPath, ledger);
+                    var target = Path.Combine(root, ledger[i].FileName);
+                    try { File.Move(PendingPath(staging, i), target, false); }
+                    catch (IOException) when (File.Exists(target) || Directory.Exists(target))
+                    {
+                        // An external producer may not use our lock. Reserve another number, never overwrite.
+                        token.ThrowIfCancellationRequested();
+                        // Move the remaining range for this day forward as a unit, preserving stable image order.
+                        for (var j = i; j < ordered.Length; j++)
+                            if (ordered[j].StudyDate == ordered[i].StudyDate)
+                                ledger[j] = ledger[j] with { FileName = FormatName(patientId,
+                                    Next(counters, Key(patientId, ordered[j].StudyDate)), ordered[j].StudyDate, examName, extension), State = "Reserved" };
+                        WriteJson(statePath, counters);
+                        continue;
+                    }
+                    ledger[i] = ledger[i] with { State = "Published" };
+                    // Callback updates the job immediately; the watcher may already have moved the file.
+                    filePublished(target);
+                    WriteJson(ledgerPath, ledger);
+                    break;
+                }
+                if ((i + 1) % 50 == 0) progress.Report(new($"RSBaseへ受け渡し中：{i + 1:N0}/{ordered.Length:N0}", (i + 1) * 100 / ordered.Length));
+            }
         }
-        Directory.Delete(staging, false);
+        finally
+        {
+            SafeFiles.DeleteOwnedDirectory(staging, stagingRoot);
+        }
     }
 
     private static string Key(string id, DateOnly date) => string.Create(CultureInfo.InvariantCulture, $"{id}~{date:yyyy_MM_dd}");

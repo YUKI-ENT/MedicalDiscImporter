@@ -125,6 +125,6 @@ public sealed class ImportPipeline(IMalwareScanner scanner)
             output.Flush(true);
         }
         if (new FileInfo(target).Length != expected.Length || SafeFiles.HashFile(target, token) != expected.Sha256)
-            throw new IOException("出力のサイズ・SHA-256照合に失敗しました。準備ファイルを保持します。");
+            throw new IOException("出力のサイズ・SHA-256照合に失敗しました。出力を停止します。");
     }
 }

@@ -66,7 +66,7 @@ public sealed class SettingsForm : DpiAwareForm
         layout.SetColumnSpan(service, 3);
         var note = new Label
         {
-            Text = "ISO：ID~000001~取込日~ISO検査名~RSB.iso\r\nDICOM：ID~000001~撮影日~DICOM検査名~RSB.dcm（日付はyyyy_MM_dd）\r\n各出力先で連番を記録し、RSBaseへ受け渡します。DICOMの内容は変更しません。\r\nRSBase側で出力先の監視を設定してください。\r\nAutoPlay/AutoRunを無効にし、ディスク内Viewerは起動しないでください。\r\n作業データ・出力先のアクセス権と保管期限は施設で管理してください。\r\n作業領域：" + PrototypeImporter.WorkRoot,
+            Text = "ISO：ID~000001~取込日~ISO検査名~RSB.iso\r\nDICOM：ID~000001~撮影日~DICOM検査名~RSB.dcm（日付はyyyy_MM_dd）\r\n各出力先で連番を記録し、RSBaseへ受け渡します。DICOMの内容は変更しません。\r\nRSBase側で出力先の監視を設定してください。\r\nAutoPlay/AutoRunを無効にし、ディスク内Viewerは起動しないでください。\r\n作業データは処理終了時に削除し、異常終了分は次回起動時に再試行します。\r\n作業領域：" + PrototypeImporter.WorkRoot,
             AutoSize = true, MaximumSize = new Size(760, 0), Padding = new Padding(0, 16, 0, 10)
         };
         layout.Controls.Add(note, 0, 7);

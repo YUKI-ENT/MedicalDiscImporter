@@ -49,6 +49,7 @@ public sealed class MainForm : DpiAwareForm
     private CancellationTokenSource? cancellation;
     private bool busy;
     private bool refreshingDrives;
+    private bool recoveringWork;
     private bool preview;
     private bool restoringSelection;
     private ImportOptions savedSelection = new();
@@ -250,6 +251,7 @@ public sealed class MainForm : DpiAwareForm
         deviceTimer.Tick += async (_, _) => { deviceTimer.Stop(); await RefreshDrivesAsync(); };
         FormClosing += (_, e) =>
         {
+            if (recoveringWork) { e.Cancel = true; return; }
             if (!busy) return;
             e.Cancel = true;
             RequestCancellation();
@@ -257,6 +259,18 @@ public sealed class MainForm : DpiAwareForm
         Shown += async (_, _) =>
         {
             if (preview) return;
+            recoveringWork = true;
+            UpdateStartAvailability();
+            var previousStage = stage.Text;
+            stage.Text = "前回の作業データを確認・削除しています";
+            try
+            {
+                var remaining = await Task.Run(() => ImportWorkspace.RecoverAsync(new WindowsImageMounter()));
+                if (remaining > 0) ShowCleanupWarning();
+                else stage.Text = previousStage;
+            }
+            catch (Exception) { ShowCleanupWarning(); }
+            finally { recoveringWork = false; UpdateStartAvailability(); }
             driveTimer.Start();
             await RefreshDrivesAsync();
         };
@@ -358,7 +372,7 @@ public sealed class MainForm : DpiAwareForm
         UpdateStartAvailability();
     }
 
-    private void UpdateStartAvailability() => start.Enabled = !busy && !refreshingDrives &&
+    private void UpdateStartAvailability() => start.Enabled = !busy && !refreshingDrives && !recoveringWork &&
         (isoSwitch.Checked || scanSwitch.Checked || dicomSwitch.Checked) &&
         drives.SelectedItem is OpticalDriveSnapshot { Ready: true } && patient.TextLength > 0 && patient.Text.All(char.IsAsciiDigit);
 
@@ -455,7 +469,7 @@ public sealed class MainForm : DpiAwareForm
 
     private async Task StartAsync()
     {
-        if (busy || refreshingDrives) return;
+        if (busy || refreshingDrives || recoveringWork) return;
         ImportOptions options;
         string root;
         try
@@ -478,6 +492,9 @@ public sealed class MainForm : DpiAwareForm
         var notificationIcon = MessageBoxIcon.Error;
         string? notificationDetail = null;
         var ejectFailed = false;
+        ImportWorkspace? workspace = null;
+        var mounter = new WindowsImageMounter();
+        var acceptingProgress = true;
         try
         {
             busy = true;
@@ -494,7 +511,6 @@ public sealed class MainForm : DpiAwareForm
             stage.ForeColor = Accent;
             cancellation = new CancellationTokenSource();
             var operation = cancellation;
-            var acceptingProgress = true;
             var reporter = new Progress<ImportProgress>(p =>
             {
                 if (!acceptingProgress || !busy || !ReferenceEquals(cancellation, operation) || operation.IsCancellationRequested) return;
@@ -506,8 +522,9 @@ public sealed class MainForm : DpiAwareForm
                 stage.Text = "ウイルスチェックサービスの接続を確認中";
                 await ServiceMalwareScanner.EnsureAvailableAsync(cancellation.Token);
             }
-            var importer = new PrototypeImporter(new ImapiImageBuilder(), new WindowsImageMounter());
-            var completed = await importer.RunAsync(root, patient.Text, reporter, cancellation.Token, options);
+            workspace = ImportWorkspace.Create();
+            var importer = new PrototypeImporter(new ImapiImageBuilder(), mounter);
+            var completed = await importer.RunAsync(root, patient.Text, reporter, cancellation.Token, options, workspace);
             var catalogProgress = new Progress<IReadOnlyList<DicomEntry>>(entries =>
             {
                 if (busy && ReferenceEquals(cancellation, operation)) ShowDicoms(entries);
@@ -539,7 +556,7 @@ public sealed class MainForm : DpiAwareForm
                     $"RSBase受け渡し：{job.DicomFilesPublished:N0}/{job.DicomCount:N0}件　検査名：{job.RsBaseExamName ?? options.RsBaseExamName}\r\n" +
                     $"DICOM：{job.DicomCount:N0}ファイル　撮影日：{string.Join(", ", job.StudyDates)}　取込日で代用：{job.DateFallbackCount:N0}件\r\n"
                     : "DICOM解析・送信：OFF\r\n") +
-                $"隔離作業領域：{imported.WorkDirectory}";
+                "作業データ：削除待ち";
             if (options.EjectAfterImport && imported.Error == null)
             {
                 // Import and output are already complete; an eject failure must not change that result.
@@ -588,7 +605,7 @@ public sealed class MainForm : DpiAwareForm
             stage.ForeColor = Color.FromArgb(183, 68, 55);
             stage.Text = "中止しました";
             overview.Text = "中止 · 出力なし";
-            result.Text = "正式出力なし。作業データは隔離領域に保持しています。";
+            result.Text = "正式出力なし。作業データを削除します。";
             outputTabs.SelectedTab = detailsTab;
         }
         catch (ContentVerificationException ex)
@@ -600,7 +617,7 @@ public sealed class MainForm : DpiAwareForm
             stage.ForeColor = Color.FromArgb(183, 68, 55);
             overview.Text = "照合不合格 · 出力なし";
             outputTabs.SelectedTab = detailsTab;
-            result.Text = $"{ex.Message}\r\nファイル内容の照合には合格していません。\r\n正式出力なし。管理者が最新の作業フォルダのverification.jsonを確認してください。\r\n作業領域：{PrototypeImporter.WorkRoot}";
+            result.Text = $"{ex.Message}\r\nファイル内容の照合には合格していません。\r\n正式出力なし。作業データを削除します。";
         }
         catch (Exception ex)
         {
@@ -610,10 +627,35 @@ public sealed class MainForm : DpiAwareForm
             stage.ForeColor = Color.FromArgb(183, 68, 55);
             overview.Text = "処理失敗 · 詳細を確認してください";
             outputTabs.SelectedTab = detailsTab;
-            result.Text = $"{ex.Message}\r\n管理者が最新のjob.jsonと設定の出力先を確認してください。\r\n作業領域：{PrototypeImporter.WorkRoot}";
+            result.Text = $"{ex.Message}\r\n設定の出力先と、出力済みファイルを確認してください。作業データを削除します。";
         }
         finally
         {
+            acceptingProgress = false;
+            cancel.Enabled = false;
+            if (workspace != null)
+            {
+                var completionText = stage.Text;
+                stage.Text = "作業データを削除しています";
+                var cleaned = false;
+                try { cleaned = await Task.Run(() => workspace.CleanupAsync(mounter)); }
+                catch (Exception) { }
+                finally { workspace.Dispose(); }
+                stage.Text = completionText;
+                result.Text = result.Text.Replace("\r\n作業データ：削除待ち", "");
+                result.AppendText(cleaned ? "\r\n作業データ：削除完了" :
+                    "\r\n作業データ：削除未完了。次回起動時に再試行します。管理者に確認してください。\r\n残存作業領域：" + workspace.DirectoryPath);
+                if (!cleaned)
+                {
+                    stage.Text += " · 作業データ削除未完了";
+                    stage.ForeColor = Color.FromArgb(167, 101, 26);
+                    outputTabs.SelectedTab = detailsTab;
+                    notificationTitle += "（作業データ削除未完了）";
+                    notificationIcon = MessageBoxIcon.Warning;
+                    notificationDetail = (notificationDetail == null ? "" : notificationDetail + "\r\n") +
+                        "一部の作業データを削除できませんでした。詳細を確認してください。";
+                }
+            }
             busy = false;
             patient.Enabled = drives.Enabled = keypad.Enabled = refresh.Enabled = settings.Enabled = operationSwitches.Enabled = true;
             cancel.Enabled = false;
@@ -630,6 +672,15 @@ public sealed class MainForm : DpiAwareForm
             MessageBox.Show(this, stage.Text + (notificationDetail == null ? "" : "\r\n" + notificationDetail)
                 + "\r\n\r\n結果は画面の一覧・保存先・検査の詳細で確認できます。",
                 notificationTitle, MessageBoxButtons.OK, notificationIcon);
+    }
+
+    private void ShowCleanupWarning()
+    {
+        stage.Text = "前回の作業データを一部削除できませんでした";
+        stage.ForeColor = Color.FromArgb(167, 101, 26);
+        result.Text = "残存する作業データは次回起動時に再試行します。管理者が確認してください。\r\n作業領域：" + PrototypeImporter.WorkRoot;
+        outputTabs.SelectedTab = detailsTab;
+        MessageBox.Show(this, result.Text, "作業データの削除未完了", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private void ShowSettings()

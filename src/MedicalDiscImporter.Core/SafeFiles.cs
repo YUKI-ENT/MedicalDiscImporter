@@ -33,6 +33,49 @@ public static class SafeFiles
             throw new IOException("リンク・再解析ポイントは取り込めません。");
     }
 
+    public static void ValidateDirectoryPath(string path)
+    {
+        for (var directory = new DirectoryInfo(Path.GetFullPath(path)); directory != null; directory = directory.Parent)
+            if (directory.Exists) RejectLink(directory);
+    }
+
+    // Destructive operations must be confined to a direct child of the explicitly supplied parent.
+    public static void DeleteOwnedDirectory(string directory, string parent) => DeleteOwnedEntry(directory, parent);
+
+    public static void DeleteOwnedEntry(string path, string parent)
+    {
+        var full = Path.GetFullPath(path);
+        var owner = Path.TrimEndingDirectorySeparator(Path.GetFullPath(parent));
+        if (!string.Equals(Path.GetDirectoryName(full), owner, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("削除対象が作業領域の外を指しています。");
+        ValidateDirectoryPath(owner);
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(full); }
+        catch (FileNotFoundException) { return; }
+        catch (DirectoryNotFoundException) { return; }
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("リンク・再解析ポイントは削除対象にできません。");
+        FileSystemInfo entry = (attributes & FileAttributes.Directory) != 0 ? new DirectoryInfo(full) : new FileInfo(full);
+        RejectLink(entry);
+        if (entry is DirectoryInfo directory)
+        {
+            List<Exception> failures = [];
+            foreach (var child in directory.EnumerateFileSystemInfos())
+            {
+                try { DeleteOwnedEntry(child.FullName, full); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { failures.Add(ex); }
+            }
+            if (failures.Count > 0) throw new IOException("一部の作業ファイルを削除できませんでした。", failures[0]);
+            directory.Delete(false);
+        }
+        else
+        {
+            // Read-only files copied from optical media must also be removed.
+            entry.Attributes &= ~FileAttributes.ReadOnly;
+            entry.Delete();
+        }
+    }
+
     public static string SafeRelative(string root, string fullPath)
     {
         if (fullPath.Split(Path.DirectorySeparatorChar).Any(p => p.EndsWith('.') || p.EndsWith(' ')))

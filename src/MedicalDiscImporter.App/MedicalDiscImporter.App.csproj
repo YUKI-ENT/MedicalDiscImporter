@@ -9,6 +9,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ImplicitUsings>enable</ImplicitUsings>
+    <PublishSigningThumbprint Condition="'$(PublishSigningThumbprint)' == ''">89AA6D9BABBAAE6672A34DE9F07E47359389ACF2</PublishSigningThumbprint>
+    <PublishSigningTimestampUrl Condition="'$(PublishSigningTimestampUrl)' == ''">http://timestamp.digicert.com</PublishSigningTimestampUrl>
     <ApplicationIcon>..\..\assets\icon-proposals\A-disc-slices.ico</ApplicationIcon>
   </PropertyGroup>
 
@@ -19,13 +21,20 @@
     <Content Include="..\..\licenses\**\*" Link="licenses\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
+  <!-- Sign the final single-file bundle, after publishing has completed. -->
+  <Target Name="SignPublishedExecutable" AfterTargets="Publish"
+          Condition="'$(SignPublishedExecutable)' == 'true'">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\scripts\Sign-PublishedExecutable.ps1&quot; -ExecutablePath &quot;$(PublishDir)$(AssemblyName).exe&quot; -CertificateThumbprint &quot;$(PublishSigningThumbprint)&quot; -PfxPath &quot;$(PublishSigningPfx)&quot; -TimestampUrl &quot;$(PublishSigningTimestampUrl)&quot;" />
+  </Target>
+
   <!-- Use a separate dotnet process so ARM64 build properties do not leak into the x64 publish. -->
-  <Target Name="PublishX64Companion" AfterTargets="Publish"
+  <Target Name="PublishX64Companion" AfterTargets="Publish" DependsOnTargets="SignPublishedExecutable"
           Condition="'$(PublishX64WithArm64)' == 'true' and '$(RuntimeIdentifier)' == 'win-arm64'">
     <Message Importance="high" Text="ARM64版の発行完了。続けてx64版を発行します。" />
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           StdOutEncoding="utf-8" StdErrEncoding="utf-8"
-          Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; --configuration &quot;$(Configuration)&quot; -p:PublishProfile=WinX64 -p:PublishX64WithArm64=false -p:ReleaseDate=$(ReleaseDate) -p:ReleaseRevision=$(_ReleaseRevisionNumber)" />
+          Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; --configuration &quot;$(Configuration)&quot; -p:PublishProfile=WinX64 -p:PublishX64WithArm64=false -p:SignPublishedExecutable=$(SignPublishedExecutable) -p:PublishSigningThumbprint=&quot;$(PublishSigningThumbprint)&quot; -p:PublishSigningPfx=&quot;$(PublishSigningPfx)&quot; -p:PublishSigningTimestampUrl=&quot;$(PublishSigningTimestampUrl)&quot; -p:ReleaseDate=$(ReleaseDate) -p:ReleaseRevision=$(_ReleaseRevisionNumber)" />
   </Target>
 
 </Project>
