@@ -1,14 +1,23 @@
 # MedicalDiscImporter 利用ガイド
 
-CD・DVDの内容をMicrosoft Defenderで検査し、ISOイメージの保存とRSBase向けDICOMファイルの受け渡しを行うWindowsアプリです。
+他院から受け取ったCD・DVDの内容を、Microsoft Defenderでウイルス検査し、ISOイメージの保存とRSBase自動ファイリング形式で出力を行うWindowsアプリです。
+
+RSDicomとほぼ同じ機能ですが、以下の特徴があります。
+- スタッフでも操作しやすいよう患者IDを入れて開始を押すだけで全自動実行
+- ウイルスチェックを行ってから出力するので、ランサムウェア対策になります（Windows Defenderで検知できないものには無効ですが）
+- もとのDiscイメージをISO形式で保存するので、再紹介するときなどDiscのコピーが可能
+- 検査日をDICOMファイルから収録するので、検査日でのRSBaseファイリングが可能
+- 複数の検査日のデータも、検査日ごとにRSBaseにファイリング
+
+  <img width="1202" height="932" alt="image" src="https://github.com/user-attachments/assets/f6b09a46-fd10-49bf-aab5-d11d71e273d3" />
+
 
 ## 1. 設置する端末と配布ファイル
 
 - Windows 11とCD・DVDを読み取れる光学ドライブを用意します。
-- Intel / AMD端末には **x64版**、ARM搭載端末には **ARM64版**を使用します。Surfaceは機種によって異なるため、Windowsの「設定 → システム → バージョン情報」で確認してください。
-- 発行済みの `MedicalDiscImporter.exe` と、同梱の `THIRD-PARTY-NOTICES.md`・`licenses` フォルダを端末の所定の場所に配置します。.NETランタイムの別途インストールは不要です。
-- 作業領域にはローカルNTFSディスクを使用します。ディスクのコピー・ISO・検査用コピーを作るため、読み込む媒体の容量に加えて十分な空き容量が必要です。作業データは処理後も残ります。
-- Microsoft Defenderを通常稼働・リアルタイム保護有効・定義更新済みの状態にします。他社製品などによりDefenderが無効／受動モードの場合は、検査を完了できません。
+- `MedicalDiscImporter.exe`を任意の場所にコピーします。.NETランタイムの別途インストールは不要です。
+- Microsoft Defenderを`通常稼働`・`リアルタイム保護有効`・`定義更新済み` の状態にします。
+- 他社製品などによりDefenderが無効／受動モードの場合は、検査を完了できません。
 - WindowsのAutoPlay / AutoRunを無効にし、持ち込まれたディスク内のViewerや実行ファイルは起動しないでください。
 
 導入時は管理者が設定し、日常の取り込みは標準ユーザーで行います。本番利用前に、ダミーデータで検査・共有への保存・RSBase側の取り込みまで確認してください。
@@ -20,7 +29,7 @@ CD・DVDの内容をMicrosoft Defenderで検査し、ISOイメージの保存と
 以下は構成例です。実際の接続先・許可範囲は施設のネットワーク管理者と決めてください。
 
 ```text
-インターネット可能ゾーン／取込専用VLAN
+インターネット可能ゾーン／取込用VLAN
   取込端末（本アプリ＋検査サービス）
     ├─ 施設指定の更新経路 → Defender定義・Windows更新
     └─ VLAN間ファイアウォール → 指定共有サーバー：TCP 445
