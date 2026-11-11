@@ -14,7 +14,10 @@ public sealed class MainForm : DpiAwareForm
         BackColor = Color.FromArgb(241, 246, 250), ForeColor = Ink, MaxLength = 32, AccessibleName = "患者ID", PlaceholderText = "患者ID"
     };
     private readonly ComboBox drives = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "光学ドライブ", FlatStyle = FlatStyle.Flat };
-    private readonly Label discStatus = new() { Dock = DockStyle.Fill, ForeColor = Muted, Text = "ドライブを確認しています", Font = new Font("Yu Gothic UI", 11), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label discStatus = new() { Dock = DockStyle.Fill, ForeColor = Muted, Text = "ドライブを確認しています", Font = new Font("Yu Gothic UI", 11), AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly DiscIndicator discMark = new();
+    private readonly Label discDetails = new() { Dock = DockStyle.Fill, AutoSize = true, ForeColor = Muted, Font = new Font("Yu Gothic UI", 10), TextAlign = ContentAlignment.MiddleRight, Margin = Padding.Empty };
+    private readonly ToolTip discTooltip = new();
     private readonly Label stage = new() { Dock = DockStyle.Fill, Text = "開始を待っています", ForeColor = Muted, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Yu Gothic UI", 12) };
     private readonly Label overview = new() { Dock = DockStyle.Fill, Text = "取り込み後に結果を表示します", ForeColor = Muted, TextAlign = ContentAlignment.MiddleRight, AutoEllipsis = true, Font = new Font("Yu Gothic UI", 11) };
     private readonly TextBox result = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, BorderStyle = BorderStyle.None, BackColor = Color.White, ScrollBars = ScrollBars.Vertical, AccessibleName = "処理結果", Font = new Font("Yu Gothic UI", 12) };
@@ -142,7 +145,14 @@ public sealed class MainForm : DpiAwareForm
         refresh.Margin = new Padding(0, 0, 0, 4);
         selector.Controls.Add(refresh, 1, 0);
         driveCard.Controls.Add(selector, 0, 1);
-        driveCard.Controls.Add(discStatus, 0, 2);
+        var discInfo = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+        discInfo.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
+        discInfo.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        discInfo.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        discInfo.Controls.Add(discMark, 0, 0);
+        discInfo.Controls.Add(discStatus, 1, 0);
+        discInfo.Controls.Add(discDetails, 2, 0);
+        driveCard.Controls.Add(discInfo, 0, 2);
         right.Controls.Add(driveCard, 0, 0);
 
         var actions = Card();
@@ -379,7 +389,7 @@ public sealed class MainForm : DpiAwareForm
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (!IsDisposed) discStatus.Text = "ドライブを確認できません。「更新」で再確認してください";
+            if (!IsDisposed) SetDiscStatus(null, "ドライブを確認できません。「更新」で再確認してください");
         }
         finally
         {
@@ -394,9 +404,21 @@ public sealed class MainForm : DpiAwareForm
 
     private void UpdateDiscStatus()
     {
-        discStatus.Text = drives.SelectedItem is OpticalDriveSnapshot drive ? drive.Status : "USBドライブを接続してください";
-        discStatus.ForeColor = drives.SelectedItem is OpticalDriveSnapshot { Ready: true } ? Accent : Muted;
+        SetDiscStatus(drives.SelectedItem as OpticalDriveSnapshot);
         UpdateStartAvailability();
+    }
+
+    private void SetDiscStatus(OpticalDriveSnapshot? drive, string? message = null)
+    {
+        var ready = drive is { Ready: true };
+        discMark.Ready = ready;
+        discMark.AccessibleName = ready ? "ディスク認識済み" : "ディスク未認識";
+        discStatus.Text = ready ? drive!.DisplayLabel : message ?? drive?.Status ?? "USBドライブを接続してください";
+        discStatus.ForeColor = ready ? Ink : Muted;
+        discDetails.Text = ready ? drive!.Status : "";
+        var description = ready ? $"ディスク認識済み：{(string.IsNullOrWhiteSpace(drive!.VolumeLabel) ? "ラベルなし" : drive.VolumeLabel)}  ·  {drive.Status}" : discStatus.Text;
+        discStatus.AccessibleName = description;
+        foreach (var control in new Control[] { discMark, discStatus, discDetails }) discTooltip.SetToolTip(control, description);
     }
 
     protected override void WndProc(ref Message m)
@@ -422,6 +444,7 @@ public sealed class MainForm : DpiAwareForm
     {
         if (disposing && !IsDisposed)
         {
+            discTooltip.Dispose();
             driveTimer.Dispose();
             deviceTimer.Dispose();
             lifetime.Cancel();
@@ -633,13 +656,13 @@ public sealed class MainForm : DpiAwareForm
         ApplySelection(new ImportOptions());
         driveTimer.Stop();
         deviceTimer.Stop();
-        discStatus.Text = "USBドライブを接続してください";
+        SetDiscStatus(null);
         if (state == "compact") { ClientSize = new Size(1000, 780); return; }
         if (state == "waiting") return;
         if (state is not ("ready" or "running" or "completed" or "failed" or "cancelled"))
             throw new ArgumentException("Unknown preview state", nameof(state));
         patient.Text = "00123456";
-        drives.Items.Add(new OpticalDriveSnapshot(@"E:\", true, "ディスク認識済み  ·  UDF / 684 MiB"));
+        drives.Items.Add(new OpticalDriveSnapshot(@"E:\", true, "CDFS / 684 MiB", "MEDICAL_DISC_2026"));
         drives.SelectedIndex = 0;
         if (state == "ready") return;
         journey.MoveTo(state == "cancelled" ? ImportPhase.CreatingIso : ImportPhase.Scanning);

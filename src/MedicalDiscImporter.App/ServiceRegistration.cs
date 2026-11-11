@@ -13,7 +13,7 @@ internal static class ServiceRegistration
 {
     internal static string InstallDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
         "MedicalDiscImporter.ScanService");
-    private static string InstalledExe => Path.Combine(InstallDirectory, "MedicalDiscImporter.App.exe");
+    private static string InstalledExe => Path.Combine(InstallDirectory, "MedicalDiscImporter.exe");
 
     internal static async Task ChangeAsync(ServiceMaintenanceAction action)
     {

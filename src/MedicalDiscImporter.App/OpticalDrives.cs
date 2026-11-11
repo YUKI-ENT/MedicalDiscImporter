@@ -2,8 +2,18 @@ using System.Runtime.InteropServices;
 
 namespace MedicalDiscImporter.App;
 
-internal sealed record OpticalDriveSnapshot(string Root, bool Ready, string Status)
+internal sealed record OpticalDriveSnapshot(string Root, bool Ready, string Status, string VolumeLabel = "")
 {
+    public string DisplayLabel
+    {
+        get
+        {
+            var label = VolumeLabel.Trim();
+            if (label.Length == 0) return "ラベルなし";
+            return label;
+        }
+    }
+
     public override string ToString() => $"{Root}  CD / DVDドライブ";
 }
 
@@ -20,8 +30,8 @@ internal static class OpticalDrives
                 if (drive.DriveType != DriveType.CDRom) continue;
                 var ready = drive.IsReady;
                 drives.Add(new(drive.Name, ready, ready
-                    ? $"ディスク認識済み  ·  {drive.DriveFormat}  /  {drive.TotalSize / 1048576:N0} MiB"
-                    : "ディスクを挿入してください"));
+                    ? $"{drive.DriveFormat} / {drive.TotalSize / 1048576:N0} MiB"
+                    : "ディスクを挿入してください", ready ? drive.VolumeLabel : ""));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
