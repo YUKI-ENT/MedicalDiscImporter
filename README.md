@@ -12,9 +12,10 @@ RSDicomとほぼ同じ機能ですが、以下の特徴があります。
   <img width="1202" height="932" alt="image" src="https://github.com/user-attachments/assets/f6b09a46-fd10-49bf-aab5-d11d71e273d3" />
 
 
-## 1. 設置する端末と配布ファイル
+## 1. 必要条件
 
-- Windows 11とCD・DVDを読み取れる光学ドライブを用意します。
+- Windows 11とCD・DVDを読み取れる光学ドライブ
+- **WindowsDefenderのウイルス定義更新が古いと動作しません。** インターネット接続か、[WhiteProxy](https://github.com/YUKI-ENT/WhiteProxy)等でウイルス定義が最新の状態が必要です。
 - `MedicalDiscImporter.exe`を任意の場所にコピーします。.NETランタイムの別途インストールは不要です。
 - Microsoft Defenderを`通常稼働`・`リアルタイム保護有効`・`定義更新済み` の状態にします。
 - 他社製品などによりDefenderが無効／受動モードの場合は、検査を完了できません。
