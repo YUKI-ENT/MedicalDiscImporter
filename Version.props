@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Release date (yyyyMMdd). Increment the revision for a second release on the same day. -->
-    <ReleaseDate Condition="'$(ReleaseDate)' == ''">20261111</ReleaseDate>
+    <ReleaseDate Condition="'$(ReleaseDate)' == ''">20261113</ReleaseDate>
     <ReleaseRevision Condition="'$(ReleaseRevision)' == ''">1</ReleaseRevision>
     <_ReleaseRevisionNumber>$([System.Int32]::Parse('$(ReleaseRevision)'))</_ReleaseRevisionNumber>
     <_ValidatedReleaseDate>$([System.DateTime]::ParseExact('$(ReleaseDate)', 'yyyyMMdd', $([System.Globalization.CultureInfo]::GetCultureInfo(''))).ToString('yyyyMMdd'))</_ValidatedReleaseDate>

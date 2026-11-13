@@ -39,14 +39,19 @@ public sealed class ImportWorkspace : IDisposable
         return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Delete);
     }
 
-    public static void RegisterOutput(string workDirectory, string destination, string jobId)
+    public static void RegisterOutput(string workDirectory, string destination, string jobId, int outputCount = 0)
     {
         var path = Path.Combine(workDirectory, OutputsFile);
         if (File.Exists(path)) SafeFiles.RejectLink(new FileInfo(path));
         var outputs = File.Exists(path) ? JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path))
             ?? throw new IOException("作業ファイル削除記録が不正です。") : [];
-        var staging = Path.Combine(Path.GetFullPath(destination), ".MedicalDiscImporter", "staging", jobId);
+        var staging = Path.Combine(OutputStorage.MetadataDirectory(destination), "staging", jobId);
         if (!outputs.Contains(staging, StringComparer.OrdinalIgnoreCase)) outputs.Add(staging);
+        for (var i = 0; i < outputCount; i++)
+        {
+            var pending = OutputStorage.PendingOutputPath(destination, jobId, i);
+            if (!outputs.Contains(pending, StringComparer.OrdinalIgnoreCase)) outputs.Add(pending);
+        }
         var temporary = path + ".tmp";
         if (File.Exists(temporary)) SafeFiles.RejectLink(new FileInfo(temporary));
         using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -75,8 +80,20 @@ public sealed class ImportWorkspace : IDisposable
                     {
                         var full = Path.GetFullPath(staging);
                         var parent = Path.GetDirectoryName(full)!;
+                        if (OutputStorage.IsPendingOutput(full, JobId))
+                        {
+                            _ = File.GetAttributes(parent);
+                            SafeFiles.DeleteOwnedEntry(full, parent);
+                            continue;
+                        }
+                        if (OutputStorage.IsLocalStaging(full, JobId))
+                        {
+                            SafeFiles.DeleteOwnedDirectory(full, parent);
+                            continue;
+                        }
+                        var metadataName = Path.GetFileName(Path.GetDirectoryName(parent))!;
                         if (Path.GetFileName(full) != JobId || Path.GetFileName(parent) != "staging" ||
-                            Path.GetFileName(Path.GetDirectoryName(parent)) != ".MedicalDiscImporter")
+                            metadataName != ".MedicalDiscImporter")
                             throw new IOException("準備領域の削除対象が不正です。");
                         // Directory.Exists also returns false for disconnected shares. Require the
                         // destination to be reachable before accepting an absent staging directory.

@@ -57,6 +57,10 @@ public sealed record ImportOptions
             Directory.CreateDirectory(path);
             var probe = Path.Combine(path, Guid.NewGuid().ToString("N") + ".write-test");
             using (new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
+            var metadata = OutputStorage.MetadataDirectory(path);
+            OutputStorage.CreateMetadataDirectory(path);
+            var metadataProbe = Path.Combine(metadata, Guid.NewGuid().ToString("N") + ".write-test");
+            using (new FileStream(metadataProbe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
         }
     }
 

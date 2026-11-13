@@ -35,8 +35,8 @@ public static class RsBasePublisher
             [new(Path.GetFileName(isoPath), importDate, new("", new FileInfo(isoPath).Length, sha256))],
             "iso", "rsbase-iso-output.json", progress, filePublished, token);
 
-    // Final files are flat. All pending bytes and sequence metadata stay in a non-RSB-named
-    // subdirectory, on the same volume/share as the watch folder. Publish each verified file by rename.
+    // Keep state and staging local. Copy each file to a temporary non-RSB name on the
+    // destination volume, verify it, then rename so watchers only see complete final files.
     public static void Publish(string source, string destination, string workDirectory, string jobId, string patientId,
         string examName, IReadOnlyList<DicomEntry> dicoms, IProgress<ImportProgress> progress,
         Action<string> filePublished, CancellationToken token)
@@ -56,13 +56,13 @@ public static class RsBasePublisher
         InputRules.ValidatePatientId(patientId);
         if (!Guid.TryParseExact(jobId, "N", out _)) throw new IOException("処理IDが不正です。");
         var root = Path.GetFullPath(destination);
-        var metadata = Path.Combine(root, ".MedicalDiscImporter");
-        CreateDirectory(metadata);
+        var metadata = OutputStorage.MetadataDirectory(root);
+        OutputStorage.CreateMetadataDirectory(root);
         var stagingRoot = Path.Combine(metadata, "staging");
         CreateDirectory(stagingRoot);
         var staging = Path.Combine(stagingRoot, jobId);
         if (Directory.Exists(staging)) throw new IOException("RSBase出力の準備領域が既に存在します。");
-        ImportWorkspace.RegisterOutput(workDirectory, root, jobId);
+        ImportWorkspace.RegisterOutput(workDirectory, root, jobId, ordered.Length);
         CreateDirectory(staging);
         try
         {
@@ -77,6 +77,15 @@ public static class RsBasePublisher
             using var lease = AcquireLock(Path.Combine(metadata, "sequence.lock"), token);
             var statePath = Path.Combine(metadata, "sequence.json");
             var counters = ReadCounters(statePath);
+            // Retain reservations from older releases, including files already consumed by RSBase.
+            // Leave the old directory untouched so interrupted legacy jobs can still be recovered.
+            var legacyDirectory = Path.Combine(root, ".MedicalDiscImporter");
+            if (Directory.Exists(legacyDirectory))
+            {
+                SafeFiles.ValidateDirectoryPath(legacyDirectory);
+                foreach (var (key, ordinal) in ReadCounters(Path.Combine(legacyDirectory, "sequence.json")))
+                    counters[key] = Math.Max(counters.GetValueOrDefault(key), ordinal);
+            }
             // Include existing files from other producers and legacy imports, across exam names.
             foreach (var path in Directory.EnumerateFileSystemEntries(root))
             {
@@ -96,19 +105,21 @@ public static class RsBasePublisher
                 ledger.Add(new(entry.RelativePath, FormatName(patientId, Next(counters, Key(patientId, entry.StudyDate)),
                     entry.StudyDate, examName, extension), entry.File.Sha256, "Reserved"));
             // Reserve the entire range durably BEFORE any watched filename becomes visible. Even if
-            // the watcher immediately consumes files, later jobs/machines will not reuse these numbers.
+            // the watcher immediately consumes files, later jobs for this Windows user will not reuse these numbers.
             WriteJson(statePath, counters);
             var ledgerPath = Path.Combine(workDirectory, ledgerName);
             WriteJson(ledgerPath, ledger);
             for (var i = 0; i < ordered.Length; i++)
             {
                 token.ThrowIfCancellationRequested();
+                var pendingOutput = OutputStorage.PendingOutputPath(root, jobId, i);
+                ImportPipeline.CopyVerified(PendingPath(staging, i), pendingOutput, ordered[i].File, token);
                 while (true)
                 {
                     ledger[i] = ledger[i] with { State = "Publishing" };
                     WriteJson(ledgerPath, ledger);
                     var target = Path.Combine(root, ledger[i].FileName);
-                    try { File.Move(PendingPath(staging, i), target, false); }
+                    try { File.Move(pendingOutput, target, false); }
                     catch (IOException) when (File.Exists(target) || Directory.Exists(target))
                     {
                         // An external producer may not use our lock. Reserve another number, never overwrite.
@@ -132,7 +143,12 @@ public static class RsBasePublisher
         }
         finally
         {
-            SafeFiles.DeleteOwnedDirectory(staging, stagingRoot);
+            try
+            {
+                for (var i = 0; i < ordered.Length; i++)
+                    SafeFiles.DeleteOwnedEntry(OutputStorage.PendingOutputPath(root, jobId, i), root);
+            }
+            finally { SafeFiles.DeleteOwnedDirectory(staging, stagingRoot); }
         }
     }
 

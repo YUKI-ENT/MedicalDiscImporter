@@ -257,6 +257,9 @@ Check("scan pass publishes verified ISO and flat RSB-named DICOM with bytes pres
     Assert(File.Exists(named) && Directory.GetFiles(output, "*~RSB.dcm", SearchOption.TopDirectoryOnly).Length == 3);
     Assert(SafeFiles.HashFile(named, default) == dicomManifest.Files.Single(f => f.RelativePath.EndsWith("IM0001")).Sha256);
     Assert(r.Record.DicomFilesPublished == 3 && r.Record.RsBaseExamName == "CTMRI");
+    Assert(Directory.GetFileSystemEntries(output).All(p => p.EndsWith(".dcm", StringComparison.OrdinalIgnoreCase)));
+    Assert(Directory.GetFileSystemEntries(f.Options.IsoDirectory).All(p => p.EndsWith(".iso", StringComparison.OrdinalIgnoreCase)));
+    Assert(!Directory.Exists(Path.Combine(output, ".MedicalDiscImporter")));
     var ledger = JsonSerializer.Deserialize<List<RsBaseOutput>>(File.ReadAllText(Path.Combine(f.Source.WorkDirectory, "rsbase-output.json")))!;
     Assert(ledger.Count == 3 && ledger.All(e => e.State == "Published"));
     Assert(File.Exists(r.Record.PublishedIsoPath));
@@ -332,8 +335,8 @@ Check("concurrent ISO publications reserve distinct ordinals", () =>
 Check("ISO sequence ledger corruption blocks publication rather than reusing numbers", () =>
 {
     var f = Fixture("iso-corrupt");
-    Directory.CreateDirectory(Path.Combine(f.Options.IsoDirectory, ".MedicalDiscImporter"));
-    File.WriteAllText(Path.Combine(f.Options.IsoDirectory, ".MedicalDiscImporter", "sequence.json"), "broken");
+    Directory.CreateDirectory(OutputStorage.MetadataDirectory(f.Options.IsoDirectory));
+    File.WriteAllText(Path.Combine(OutputStorage.MetadataDirectory(f.Options.IsoDirectory), "sequence.json"), "broken");
     var r = Complete(f, new StubScanner("Passed"));
     Assert(r.Error != null && !r.Record.IsoPublished && !Directory.GetFiles(f.Options.IsoDirectory, "*.iso").Any());
 });
@@ -380,7 +383,7 @@ Check("concurrent imports share one ISO DICOM output folder without collisions",
 Check("DICOM failure after ISO is recorded as partial output", () =>
 {
     var f = Fixture("partial"); f.Options.CheckWritable();
-    Directory.CreateDirectory(Path.Combine(f.Options.DicomDirectory, ".MedicalDiscImporter", "staging", f.Source.Record.JobId));
+    Directory.CreateDirectory(Path.Combine(OutputStorage.MetadataDirectory(f.Options.DicomDirectory), "staging", f.Source.Record.JobId));
     var r = Complete(f, new StubScanner("Passed"));
     Assert(r.Error != null && r.Record.State == "PartialOutput" && r.Record.IsoPublished && !r.Record.DicomPublished);
     var saved = JsonSerializer.Deserialize<JobRecord>(File.ReadAllText(Path.Combine(f.Source.WorkDirectory, "job.json")))!;
@@ -521,6 +524,30 @@ Check("RSB sequence remains monotonic after the watcher consumes all output file
     }
     Assert(names.Count == 6 && names.Distinct().Count() == 6 && names.Skip(3).All(n => n.Contains("~000002~")));
 });
+Check("legacy reservations continue in local storage after watched files are consumed", () =>
+{
+    var f = Fixture("rsb-legacy-state"); f.Options.CheckWritable();
+    var legacy = Path.Combine(f.Options.DicomDirectory, ".MedicalDiscImporter");
+    Directory.CreateDirectory(legacy);
+    var statePath = Path.Combine(legacy, "sequence.json");
+    var state = JsonSerializer.Serialize(new Dictionary<string, long> { ["00123~2026_10_31"] = 42 });
+    File.WriteAllText(statePath, state);
+    var imported = Complete(f, new StubScanner("Passed"));
+    Assert(imported.Error == null);
+    Assert(File.Exists(Path.Combine(f.Options.DicomDirectory, "00123~000043~2026_10_31~CTMRI~RSB.dcm")));
+    Assert(File.ReadAllText(statePath) == state);
+    Assert(File.Exists(Path.Combine(OutputStorage.MetadataDirectory(f.Options.DicomDirectory), "sequence.json")));
+});
+Check("local storage normalizes folder case and separates full destination paths", () =>
+{
+    var destination = Path.Combine(root, "state-path", "dicom");
+    Assert(OutputStorage.MetadataDirectory(destination).Equals(
+        OutputStorage.MetadataDirectory(destination.ToUpperInvariant() + Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase));
+    Assert(OutputStorage.MetadataDirectory(destination) != OutputStorage.MetadataDirectory(Path.Combine(root, "state-path", "iso")));
+    Assert(OutputStorage.MetadataDirectory(destination) != OutputStorage.MetadataDirectory(Path.Combine(root, "another-state-path", "dicom")));
+    Assert(Path.GetDirectoryName(OutputStorage.MetadataDirectory(destination)) == OutputStorage.Root);
+    Assert(OutputStorage.MetadataDirectory(Path.GetPathRoot(root)!).StartsWith(OutputStorage.Root));
+});
 Check("concurrent RSB jobs share durable sequence reservations", () =>
 {
     var a = Fixture("rsb-parallel-a"); var b = Fixture("rsb-parallel-b");
@@ -556,7 +583,7 @@ Check("RSB cancellation after first rename preserves an auditable partial handof
     var ledger = JsonSerializer.Deserialize<List<RsBaseOutput>>(File.ReadAllText(Path.Combine(f.Source.WorkDirectory, "rsbase-output.json")))!;
     Assert(published == 1 && ledger.Count(e => e.State == "Published") == 1 &&
         Directory.GetFiles(f.Options.DicomDirectory, "*~RSB.dcm").Length == 1);
-    Assert(!Directory.EnumerateDirectories(Path.Combine(f.Options.DicomDirectory, ".MedicalDiscImporter", "staging")).Any());
+    Assert(!Directory.EnumerateDirectories(Path.Combine(OutputStorage.MetadataDirectory(f.Options.DicomDirectory), "staging")).Any());
 });
 Check("corrupt RSB sequence metadata blocks handoff without resetting numbers", () =>
 {
@@ -1023,7 +1050,7 @@ foreach (var verdict in new[] { "Passed", "ThreatDetected", "Unknown", "Cancelle
         {
             Assert(File.Exists(imported.Record.PublishedIsoPath));
             Assert(Directory.GetFiles(fixture.Options.DicomDirectory, "*~RSB.dcm").Length == 3);
-            Assert(File.Exists(Path.Combine(fixture.Options.DicomDirectory, ".MedicalDiscImporter", "sequence.json")));
+            Assert(File.Exists(Path.Combine(OutputStorage.MetadataDirectory(fixture.Options.DicomDirectory), "sequence.json")));
         }
     });
 Check("workspace cleanup runs independently of cancellation and removes read-only files", () =>
@@ -1055,11 +1082,12 @@ Check("recovery dismounts an interrupted ISO and removes shared pending bytes wi
     var destination = Path.Combine(root, "cleanup-shared");
     var workspace = ImportWorkspace.Create(workRoot);
     ImportWorkspace.RegisterOutput(workspace.DirectoryPath, destination, workspace.JobId);
-    var stagingRoot = Path.Combine(destination, ".MedicalDiscImporter", "staging");
+    var stagingRoot = Path.Combine(OutputStorage.MetadataDirectory(destination), "staging");
     var staging = Path.Combine(stagingRoot, workspace.JobId);
     Directory.CreateDirectory(staging); File.WriteAllText(Path.Combine(staging, "00000000.pending"), "dummy");
     var other = Path.Combine(stagingRoot, Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(other); File.WriteAllText(Path.Combine(other, "other.pending"), "another job");
+    Directory.CreateDirectory(destination);
     var final = Path.Combine(destination, "00123~000001~2026_11_11~CTMRI~RSB.dcm");
     File.WriteAllText(final, "published");
     File.WriteAllText(Path.Combine(workspace.DirectoryPath, "disc.iso"), "dummy iso");
@@ -1070,21 +1098,39 @@ Check("recovery dismounts an interrupted ISO and removes shared pending bytes wi
     Assert(mounter.Dismounts == 1 && !Directory.Exists(workspace.DirectoryPath) && !Directory.Exists(staging));
     Assert(File.ReadAllText(final) == "published" && File.Exists(Path.Combine(other, "other.pending")));
 });
-Check("unavailable destination preserves only retry instructions and cleans pending data after reconnect", () =>
+Check("recovery still removes pending output recorded by legacy releases", () =>
+{
+    var workRoot = Path.Combine(root, "cleanup-legacy");
+    var workspace = ImportWorkspace.Create(workRoot);
+    var destination = Path.Combine(root, "cleanup-legacy-output");
+    var staging = Path.Combine(destination, ".MedicalDiscImporter", "staging", workspace.JobId);
+    Directory.CreateDirectory(staging);
+    File.WriteAllText(Path.Combine(staging, "00000000.pending"), "dummy");
+    File.WriteAllText(Path.Combine(workspace.DirectoryPath, "cleanup-outputs.json"), JsonSerializer.Serialize(new[] { staging }));
+    workspace.Dispose();
+    Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
+    Assert(!Directory.Exists(staging) && !Directory.Exists(workspace.DirectoryPath));
+});
+Check("unavailable destination preserves retry instructions and recovers temporary output after reconnect", () =>
 {
     var workRoot = Path.Combine(root, "cleanup-disconnected");
     var workspace = ImportWorkspace.Create(workRoot);
     var destination = Path.Combine(root, "cleanup-reconnected-share");
-    ImportWorkspace.RegisterOutput(workspace.DirectoryPath, destination, workspace.JobId);
+    ImportWorkspace.RegisterOutput(workspace.DirectoryPath, destination, workspace.JobId, 1);
+    var staging = Path.Combine(OutputStorage.MetadataDirectory(destination), "staging", workspace.JobId);
+    Directory.CreateDirectory(staging); File.WriteAllText(Path.Combine(staging, "00000000.pending"), "local dummy");
     File.WriteAllText(Path.Combine(workspace.DirectoryPath, "patient.dcm"), "dummy");
     Assert(!workspace.CleanupAsync(new ForbiddenImageMounter()).GetAwaiter().GetResult());
+    Assert(!Directory.Exists(staging));
     Assert(!File.Exists(Path.Combine(workspace.DirectoryPath, "patient.dcm")));
     Assert(File.Exists(Path.Combine(workspace.DirectoryPath, "cleanup-outputs.json")));
     workspace.Dispose();
-    var staging = Path.Combine(destination, ".MedicalDiscImporter", "staging", workspace.JobId);
-    Directory.CreateDirectory(staging); File.WriteAllText(Path.Combine(staging, "00000000.pending"), "dummy");
+    Directory.CreateDirectory(destination);
+    var pending = Path.Combine(destination, $".MedicalDiscImporter-{workspace.JobId}-00000000.pending");
+    var other = Path.Combine(destination, $".MedicalDiscImporter-{Guid.NewGuid():N}-00000000.pending");
+    File.WriteAllText(pending, "dummy"); File.WriteAllText(other, "another job");
     Assert(ImportWorkspace.RecoverAsync(new ForbiddenImageMounter(), workRoot).GetAwaiter().GetResult() == 0);
-    Assert(!Directory.Exists(workspace.DirectoryPath) && !Directory.Exists(staging));
+    Assert(!Directory.Exists(workspace.DirectoryPath) && !File.Exists(pending) && File.Exists(other));
 });
 Check("dismount failure still removes copied patient files and retries only the ISO on next recovery", () =>
 {
